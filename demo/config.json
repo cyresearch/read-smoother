@@ -1,0 +1,12 @@
+{
+  "language": "en",
+  "vault_path": "demo/data/notes",
+  "vault_name": "",
+  "notes_folder": "Reading",
+  "paper_notes_folder": "Papers",
+  "bib_path": "",
+  "default_voice": "en-US-AriaNeural",
+  "tts_locales": ["en"],
+  "ai_read_dirs": [],
+  "profile_path": "demo/profile.md"
+}

@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Read Smoother</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f3f1ec; --panel: #fffdf9; --ink: #2a2723; --muted: #7a746b; --line: #e3ded4;
+    --accent: #b8542e; --now: rgba(255, 196, 0, .38); --hl: rgba(255, 140, 60, .30);
+    --hl-border: rgba(200, 90, 20, .6); --btn: #ece8df;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; display: flex; flex-direction: column; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header .title { font-weight: 600; margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 14vw; }
+  button, select, input[type=number] { font: inherit; border: 1px solid var(--line); background: var(--btn); color: var(--ink); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button:hover { background: #e2ddd2; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { background: #a0471f; }
+  button.icon { padding: 5px 9px; min-width: 34px; }
+  input[type=number] { width: 64px; text-align: center; }
+  .group { display: flex; align-items: center; gap: 4px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  input[type=range] { width: 90px; }
+  #voice { max-width: 128px; }
+  html[lang=en] .only-zh, html[lang=zh] .only-en { display: none !important; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  nav#toc { width: 270px; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 8px 6px; flex-shrink: 0; }
+  nav#toc.hidden { display: none; }
+  .t { padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.35; color: #4a4540; }
+  .t:hover { background: #f1ede4; }
+  .t.l1 { font-weight: 600; color: var(--ink); margin-top: 8px; }
+  .t.l2 { padding-left: 18px; }
+  .t.l3 { padding-left: 30px; font-size: 12px; }
+  .t.cur { background: var(--now); color: var(--ink); }
+  .t .pg { float: right; color: var(--muted); font-size: 11px; margin-left: 6px; }
+  #btn-toc.on { background: #d9d3c6; }
+  #pdfwrap { flex: 1; overflow: auto; padding: 18px; display: flex; flex-direction: column; align-items: center; }
+  .pagenav { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 14px 0 6px; color: var(--muted); font-size: 13px; flex-shrink: 0; }
+  .pagenav button { padding: 7px 16px; }
+  #pagebox { position: relative; box-shadow: 0 2px 14px rgba(0,0,0,.15); background: #fff; }
+  #pagebox canvas { display: block; }
+  #hl-layer, #sent-layer { position: absolute; inset: 0; }
+  .hl { position: absolute; background: var(--hl); border-bottom: 2px solid var(--hl-border); cursor: pointer; }
+  .sent { position: absolute; cursor: pointer; border-radius: 2px; }
+  .sent:hover { background: rgba(0, 0, 0, .06); }
+  .sent.now { background: var(--now); }
+  .sent.skip { opacity: .35; }
+
+  aside { width: 380px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 9px; color: var(--muted); }
+  .tabs button.active { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+  .pane { flex: 1; overflow: auto; padding: 8px; display: none; }
+  .pane.active { display: block; }
+
+  .note { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: #fff; }
+  .note .pg { font-size: 12px; color: var(--accent); font-weight: 600; cursor: pointer; }
+  .note .q { font-style: italic; color: #4a4540; margin: 4px 0; border-left: 3px solid var(--hl-border); padding-left: 8px; }
+  .note .n { white-space: pre-wrap; margin: 4px 0; }
+  html[lang=zh] .note .n:empty::before { content: "（还没写感想，点“写感想”）"; color: var(--muted); }
+  html[lang=en] .note .n:empty::before { content: "(no note yet; click “Write note”)"; color: var(--muted); }
+  .note .row { display: flex; gap: 4px; justify-content: flex-end; }
+  .note .row button { padding: 2px 8px; font-size: 12px; }
+
+  #pane-ai { display: none; flex-direction: column; padding: 0; }
+  #pane-ai.active { display: flex; }
+  #ai-top { display: flex; gap: 6px; align-items: center; padding: 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; font-size: 12px; }
+  #ai-top select { max-width: 150px; }
+  #ai-msgs { flex: 1; overflow: auto; padding: 10px; }
+  .msg { margin-bottom: 10px; max-width: 95%; }
+  .msg.user { margin-left: auto; background: #ece8df; border-radius: 10px 10px 2px 10px; padding: 7px 10px; white-space: pre-wrap; }
+  .msg.ai { background: #fff; border: 1px solid var(--line); border-radius: 10px 10px 10px 2px; padding: 8px 10px; }
+  .msg.ai .t p { margin: 0 0 8px; } .msg.ai .t p:last-child { margin-bottom: 0; }
+  .msg.ai .t ul, .msg.ai .t ol { margin: 4px 0 8px; padding-left: 20px; }
+  .msg.ai .t li { margin: 2px 0; }
+  .msg.ai .t blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--hl-border); color: #4a4540; background: #fff8ee; }
+  .msg.ai .t code { font: 12px/1.4 ui-monospace, Menlo, monospace; background: #f1ede4; padding: 1px 4px; border-radius: 4px; }
+  .msg.ai .t pre { background: #f1ede4; padding: 8px; border-radius: 6px; overflow: auto; }
+  .msg.ai .t pre code { background: none; padding: 0; }
+  .msg.ai .t h1, .msg.ai .t h2, .msg.ai .t h3 { font-size: 14px; margin: 8px 0 4px; }
+  .msg.ai .t strong { color: #8a3d1a; }
+  .msg.ai .t table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+  .msg.ai .t th, .msg.ai .t td { border: 1px solid var(--line); padding: 3px 6px; }
+  .msg.ai.err .t { white-space: pre-wrap; }
+  .msg.ai .meta { color: var(--muted); font-size: 11px; margin-top: 6px; display: flex; gap: 6px; align-items: center; }
+  .msg.ai .meta button { padding: 1px 7px; font-size: 11px; }
+  .msg.ai.err { border-color: #e0a0a0; color: #a33; }
+  #ai-in { border-top: 1px solid var(--line); padding: 8px; background: #fff8ee; }
+  #ai-quick { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; align-items: center; }
+  #ai-quick button { padding: 3px 9px; font-size: 12px; border-radius: 12px; background: #fff; }
+  #ai-quick button:hover { background: #ece8df; }
+  #ai-quick button .k { color: var(--muted); font-size: 10px; margin-right: 3px; }
+  #ai-quick .edit { border: 0; background: transparent; color: var(--muted); }
+  #ai-quick-edit { display: none; margin-bottom: 6px; }
+  #ai-quick-edit textarea { width: 100%; min-height: 110px; font: 13px/1.5 inherit; border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  #ai-quick-edit .row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+  #ai-ctx { font-size: 12px; color: #6b5a44; background: #fff1dc; border: 1px solid #f0d9b5; border-radius: 6px; padding: 4px 8px; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #ai-ctx.off { opacity: .5; text-decoration: line-through; }
+  #ai-q { width: 100%; min-height: 58px; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px; resize: vertical; }
+  #ai-in .row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+  .typing::after { content: "▍"; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  #editor { border-top: 1px solid var(--line); padding: 10px; background: #fff8ee; display: none; }
+  #editor.open { display: block; }
+  #editor .q { font-style: italic; color: #4a4540; font-size: 13px; max-height: 80px; overflow: auto; border-left: 3px solid var(--hl-border); padding-left: 8px; margin-bottom: 6px; }
+  #editor textarea { width: 100%; min-height: 90px; font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 6px; resize: vertical; }
+  #editor .row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; align-items: center; }
+
+  #dict { position: absolute; z-index: 5; width: 360px; max-height: 320px; overflow: auto; background: #fffdf6; border: 1px solid #d8d0bf; border-radius: 10px; box-shadow: 0 6px 22px rgba(0,0,0,.18); padding: 10px 12px; font-size: 13px; line-height: 1.55; display: none; }
+  #dict.show { display: block; }
+  #dict .w { font-weight: 700; font-size: 16px; margin-right: 6px; }
+  #dict .head { color: #4a4540; margin-bottom: 4px; }
+  #dict .body { white-space: pre-wrap; }
+  #dict .row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+  #dict .row button { padding: 2px 8px; font-size: 12px; }
+  #dict .none { color: var(--muted); }
+  #dict .ph { background: #fff1dc; border: 1px solid #f0d9b5; border-radius: 8px; padding: 6px 8px; margin-bottom: 8px; }
+  #dict .ph .pt { font-weight: 700; color: #8a5a2b; }
+  #dict .ph .note { color: var(--muted); font-size: 12px; }
+  #dict details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 4px 0; }
+  .wordhit { position: absolute; background: rgba(60, 120, 220, .18); border-radius: 2px; pointer-events: none; }
+  #btn-dict.on { background: #d9d3c6; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #2a2723; color: #fff; padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; font-size: 13px; }
+  #toast.show { opacity: .92; }
+  kbd { font: 11px/1 ui-monospace, monospace; background: #eee9df; border: 1px solid #d8d2c5; border-bottom-width: 2px; border-radius: 4px; padding: 2px 5px; }
+  #help { display: none; position: fixed; right: 396px; bottom: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 12px; line-height: 2; box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+  #help.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/" id="btn-shelf" data-i18n-title="回书架" title="回书架" style="text-decoration:none"><button class="icon">📚</button></a>
+  <button class="icon" id="btn-toc" data-i18n="☰ 目录" data-i18n-title="目录 (T)" title="目录 (T)">☰ 目录</button>
+  <div class="title" id="title" data-i18n="载入中…">载入中…</div>
+  <div class="group">
+    <button class="icon" id="btn-prev-s" data-i18n-title="上一句 (←)" title="上一句 (←)">⏮</button>
+    <button class="icon primary" id="btn-play" data-i18n-title="播放/暂停 (空格)" title="播放/暂停 (空格)">▶</button>
+    <button class="icon" id="btn-next-s" data-i18n-title="下一句 (→)" title="下一句 (→)">⏭</button>
+  </div>
+  <div class="group">
+    <button id="btn-prev-p" data-i18n="‹ 上页" data-i18n-title="上一页 ([)" title="上一页 ([)">‹ 上页</button>
+    <input type="number" id="pageno" min="1" value="1">
+    <span class="muted" id="pagetotal">/ ?</span>
+    <button id="btn-next-p" data-i18n="下页 ›" data-i18n-title="下一页 (])" title="下一页 (])">下页 ›</button>
+  </div>
+  <div class="group">
+    <span class="muted" data-i18n="语速">语速</span>
+    <input type="range" id="rate" min="0.6" max="2" step="0.05" value="1">
+    <span class="muted" id="rateval">1.00×</span>
+  </div>
+  <div class="group"><span class="muted" data-i18n="声音">声音</span><select id="voice" data-i18n-title="换一个朗读声音" title="换一个朗读声音"></select></div>
+  <button id="btn-hl" data-i18n="★ 高亮" data-i18n-title="高亮当前句 (H)" title="高亮当前句 (H)">★ 高亮</button>
+  <button id="btn-note" data-i18n="✎ 感想" data-i18n-title="给当前句写感想 (N)" title="给当前句写感想 (N)">✎ 感想</button>
+  <button id="btn-obsidian" data-i18n-title="在 Obsidian 里打开这本书的笔记" title="在 Obsidian 里打开这本书的笔记" style="display:none">Obsidian</button>
+  <button id="btn-zotero" data-i18n-title="在 Zotero 里选中这篇" title="在 Zotero 里选中这篇" style="display:none">Zotero</button>
+  <button class="icon on" id="btn-dict" data-i18n-title="鼠标停在单词上查词 (D)" title="鼠标停在单词上查词 (D)">📖</button>
+  <button class="icon" id="btn-lang" title="Language / 语言">EN</button>
+  <button class="icon" id="btn-help" data-i18n-title="快捷键" title="快捷键">?</button>
+</header>
+
+<main>
+  <nav id="toc"></nav>
+  <div id="pdfwrap">
+    <div id="pagebox">
+      <canvas id="canvas"></canvas>
+      <div id="hl-layer"></div>
+      <div id="sent-layer"></div>
+      <div id="wordhits"></div>
+      <div id="dict"></div>
+    </div>
+    <div class="pagenav">
+      <button id="btn-prev-p2" data-i18n="‹ 上一页">‹ 上一页</button>
+      <span id="pagenav-label"></span>
+      <button id="btn-next-p2" data-i18n="下一页 ›">下一页 ›</button>
+      <span class="muted" data-i18n="（滚轮滚到底会自动翻页）">（滚轮滚到底会自动翻页）</span>
+    </div>
+  </div>
+  <aside>
+    <div class="tabs">
+      <button class="active" data-pane="pane-notes"><span data-i18n="摘录与笔记">摘录与笔记</span> <span id="notecount" class="muted"></span></button>
+      <button data-pane="pane-ai" data-i18n="问 AI">问 AI</button>
+    </div>
+    <div class="pane active" id="pane-notes"></div>
+    <div class="pane" id="pane-ai">
+      <div id="ai-top">
+        <select id="ai-model" data-i18n-title="换模型" title="换模型"></select>
+        <label><input type="checkbox" id="ai-page" checked> <span data-i18n="附本页">附本页</span></label>
+        <label><input type="checkbox" id="ai-sent" checked> <span data-i18n="附当前句">附当前句</span></label>
+        <button class="small" id="ai-new" data-i18n="新对话" style="margin-left:auto;padding:3px 8px;font-size:12px">新对话</button>
+      </div>
+      <div id="ai-msgs"></div>
+      <div id="ai-in">
+        <div id="ai-quick"></div>
+        <div id="ai-quick-edit">
+          <textarea id="ai-quick-text" data-i18n-placeholder="一行一个快捷问题" placeholder="一行一个快捷问题"></textarea>
+          <div class="row"><span class="muted" style="margin-right:auto" data-i18n="一行一个；数字键 1–9 对应前九个">一行一个；数字键 1–9 对应前九个</span><button class="small" id="ai-quick-cancel" data-i18n="取消">取消</button><button class="small primary" id="ai-quick-save" data-i18n="保存">保存</button></div>
+        </div>
+        <div id="ai-ctx" data-i18n-title="发送时会附上这一句（和前后两句）。点一下跳回这句。" title="发送时会附上这一句（和前后两句）。点一下跳回这句。"></div>
+        <textarea id="ai-q" data-i18n-placeholder="问点什么… 比如：这句在说什么？ (Enter 或 ⌘Enter 发送，Shift+Enter 换行，A 键聚焦)" placeholder="问点什么… 比如：这句在说什么？ (Enter 或 ⌘Enter 发送，Shift+Enter 换行，A 键聚焦)"></textarea>
+        <div class="row">
+          <span class="muted" id="ai-hint" style="margin-right:auto" data-i18n="走本机 Claude Code，记住上下文；能翻整本书，也能读你贴的文件路径">走本机 Claude Code，记住上下文；能翻整本书，也能读你贴的文件路径</span>
+          <input type="file" id="ai-file" multiple style="display:none">
+          <button id="ai-attach" data-i18n-title="附上文件（也可以直接把文件拖进输入框）" title="附上文件（也可以直接把文件拖进输入框）">📎</button>
+          <button class="primary" id="ai-send" data-i18n="发送">发送</button>
+        </div>
+      </div>
+    </div>
+    <div id="editor">
+      <div class="q" id="ed-quote"></div>
+      <textarea id="ed-text" data-i18n-placeholder="写点感想… (⌘/Ctrl+Enter 保存，Esc 取消)" placeholder="写点感想… (⌘/Ctrl+Enter 保存，Esc 取消)"></textarea>
+      <div class="row">
+        <span class="muted" style="margin-right:auto" id="ed-hint"></span>
+        <button id="ed-cancel" data-i18n="取消">取消</button>
+        <button class="primary" id="ed-save" data-i18n="保存感想">保存感想</button>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div id="help">
+  <div class="only-zh">
+    <kbd>空格</kbd> 播放 / 暂停 &nbsp; <kbd>←</kbd><kbd>→</kbd> 上一句 / 下一句 &nbsp; <kbd>[</kbd><kbd>]</kbd> 翻页<br>
+    <kbd>H</kbd> 高亮当前句（再按取消） &nbsp; <kbd>N</kbd> 给当前句写感想 &nbsp; <kbd>-</kbd><kbd>=</kbd> 语速 &nbsp; <kbd>T</kbd> 目录 &nbsp; <kbd>D</kbd> 取词开关 &nbsp; <kbd>A</kbd> 问 AI &nbsp; <kbd>1</kbd>–<kbd>9</kbd> 快捷问题<br>
+    鼠标停在单词上半秒：弹出音标和释义（macOS 自带词典），🔊 读这个词<br>
+    点句子：从那里开始读 &nbsp; <kbd>Shift</kbd>+点：把当前句到那句一起高亮 &nbsp; 点橙色高亮：改感想
+  </div>
+  <div class="only-en">
+    <kbd>Space</kbd> play / pause &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next sentence &nbsp; <kbd>[</kbd><kbd>]</kbd> page<br>
+    <kbd>H</kbd> highlight current sentence (again to remove) &nbsp; <kbd>N</kbd> note on current sentence &nbsp; <kbd>-</kbd><kbd>=</kbd> speed &nbsp; <kbd>T</kbd> contents &nbsp; <kbd>D</kbd> dictionary &nbsp; <kbd>A</kbd> ask AI &nbsp; <kbd>1</kbd>–<kbd>9</kbd> quick questions<br>
+    Hover a word for half a second: pronunciation and definition (macOS dictionary), 🔊 says it<br>
+    Click a sentence: read from there &nbsp; <kbd>Shift</kbd>+click: highlight from the current sentence to that one &nbsp; click an orange highlight: edit its note
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+(() => {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const SLUG = location.pathname.split("/").filter(Boolean).pop();
+  const B = "/api/b/" + SLUG;
+  const $ = (id) => document.getElementById(id);
+  const api = async (url, opt) => { const r = await fetch(url, opt); if (!r.ok) throw new Error(await r.text()); return r.json(); };
+  const post = (url, body, method = "POST") => api(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  // ---------- i18n: Chinese strings are the keys; English is looked up ----------
+  const EN = {
+    "回书架": "Back to shelf", "☰ 目录": "☰ Contents", "目录 (T)": "Contents (T)", "载入中…": "Loading…",
+    "上一句 (←)": "Previous sentence (←)", "播放/暂停 (空格)": "Play / pause (Space)", "下一句 (→)": "Next sentence (→)",
+    "‹ 上页": "‹ Prev", "上一页 ([)": "Previous page ([)", "下页 ›": "Next ›", "下一页 (])": "Next page (])",
+    "语速": "Speed", "声音": "Voice", "换一个朗读声音": "Choose a voice",
+    "★ 高亮": "★ Highlight", "高亮当前句 (H)": "Highlight the current sentence (H)",
+    "✎ 感想": "✎ Note", "给当前句写感想 (N)": "Write a note on the current sentence (N)",
+    "在 Obsidian 里打开这本书的笔记": "Open this book's note in Obsidian", "在 Zotero 里选中这篇": "Select this item in Zotero",
+    "鼠标停在单词上查词 (D)": "Hover a word to look it up (D)", "快捷键": "Shortcuts",
+    "‹ 上一页": "‹ Previous page", "下一页 ›": "Next page ›", "（滚轮滚到底会自动翻页）": "(scrolling past the bottom turns the page)",
+    "摘录与笔记": "Highlights & notes", "问 AI": "Ask AI", "换模型": "Model", "附本页": "Attach this page", "附当前句": "Attach current sentence",
+    "新对话": "New chat", "一行一个快捷问题": "One quick question per line", "一行一个；数字键 1–9 对应前九个": "One per line; keys 1–9 trigger the first nine",
+    "取消": "Cancel", "保存": "Save", "保存感想": "Save note",
+    "发送时会附上这一句（和前后两句）。点一下跳回这句。": "Sent with your question (plus two sentences either side). Click to jump back to it.",
+    "问点什么… 比如：这句在说什么？ (Enter 或 ⌘Enter 发送，Shift+Enter 换行，A 键聚焦)": "Ask something… e.g. What does this sentence mean? (Enter or ⌘Enter to send, Shift+Enter for a new line, A to focus)",
+    "走本机 Claude Code，记住上下文；能翻整本书，也能读你贴的文件路径": "Runs through your local Claude Code; remembers context, can search the whole book and read file paths you paste",
+    "附上文件（也可以直接把文件拖进输入框）": "Attach a file (or drop it onto the box)", "发送": "Send",
+    "写点感想… (⌘/Ctrl+Enter 保存，Esc 取消)": "Write a note… (⌘/Ctrl+Enter to save, Esc to cancel)",
+    "这本 PDF 没有书签，也没猜出标题": "No bookmarks in this PDF, and no headings could be guessed",
+    "没有书签，目录是按字体猜的": "No bookmarks; contents guessed from fonts",
+    "（点击写感想）": "(click to write a note)",
+    "当前：p.{page} · “{text}”": "Now: p.{page} · “{text}”",
+    "当前：p.{page} · （还没选中句子，点 PDF 上的一句）": "Now: p.{page} · (no sentence selected; click one on the page)",
+    "语音获取失败，2 秒后重试": "Could not fetch audio, retrying in 2 s", "读完了 🎉": "Finished 🎉",
+    "这条高亮已有感想，一起删掉吗？": "This highlight has a note. Delete both?",
+    "已取消高亮": "Highlight removed", "已高亮，写进笔记了": "Highlighted and saved to your notes",
+    "高亮了 {n} 句": "Highlighted {n} sentences", "会写进 {path}": "Goes into {path}", "感想已保存": "Note saved",
+    "还没有摘录。读到喜欢的句子按 <kbd>H</kbd> 高亮，按 <kbd>N</kbd> 写感想。": "No highlights yet. Press <kbd>H</kbd> on a sentence you like, <kbd>N</kbd> to write a note.",
+    "改感想": "Edit note", "写感想": "Write note", "删除": "Delete", "删除这条摘录（含感想）？": "Delete this highlight and its note?",
+    "找不到 claude 命令行，请先装 Claude Code": "claude CLI not found. Install Claude Code first",
+    "存为感想": "Save as note", "把这问答存到当前句的摘录感想里": "Save this Q&A into the current sentence's note", "读出回答": "Read the answer aloud",
+    "先选一句": "Select a sentence first", "问：": "Q: ", "答：": "A: ", "已存进笔记": "Saved to your notes",
+    "正在翻书… ({tool})": "Looking through the book… ({tool})", "请求失败：": "Request failed: ",
+    "这句话是什么意思？": "What does this sentence mean?",
+    "点一下就带着当前句发送": "Click to send with the current sentence", "（数字键 {n}）": " (key {n})",
+    "✎ 改": "✎ Edit", "编辑快捷问题": "Edit quick questions", "上一条还在回答": "Still answering the previous question", "快捷问题已保存": "Quick questions saved",
+    "文件：": "File: ", "已附上 {name}": "Attached {name}", "上传失败：": "Upload failed: ",
+    "开始新对话？旧的记录还会留在下面。": "Start a new chat? Earlier messages stay visible below.",
+    "新对话，AI 不再记得之前的内容": "New chat: the AI no longer remembers earlier messages",
+    "取词已打开（D 键或 📖 可关）": "Dictionary on (D or 📖 to turn off)", "取词已关闭（D 键或 📖 可开）": "Dictionary off (D or 📖 to turn on)",
+    "短语动词 ": "Phrasal verb ", "短语 ": "Phrase ", "读这个词": "Say the word", "词典 App": "Dictionary app", "在 macOS 词典里打开": "Open in the macOS Dictionary app",
+    "单词本身：": "The word itself: ", "词典里没有这个词": "Not in the dictionary", "查词需要 macOS 自带词典": "Dictionary lookup needs the macOS dictionary",
+    "目录已收起（T）": "Contents hidden (T)", "目录已展开（T）": "Contents shown (T)", "载入失败: ": "Failed to load: ",
+    "最快": "fastest", "均衡": "balanced", "强": "strong", "最强": "strongest",
+  };
+  let LANG = localStorage.getItem("lang") || "";
+  const t = (s, vars) => {
+    let out = (LANG === "en" && EN[s] !== undefined) ? EN[s] : s;
+    if (vars) for (const k in vars) out = out.split("{" + k + "}").join(vars[k]);
+    return out;
+  };
+  function applyLang() {
+    document.documentElement.lang = LANG === "en" ? "en" : "zh";
+    $("btn-lang").textContent = LANG === "en" ? "中文" : "EN";
+    document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+    if (S.book) $("title").textContent = S.book.title + (S.book.author ? " · " + S.book.author : "");
+    renderQuick(); renderNotesPane(); updateAiCtx(); labelModels();
+    if (S.toc) renderTocList();
+  }
+  function setLang(l) { LANG = l; localStorage.setItem("lang", l); applyLang(); }
+
+  // ---------- state ----------
+  const S = {
+    book: null, pdf: null, page: 1, pageData: null, cur: -1,
+    playing: false, voice: "en-US-AriaNeural", rate: 1, notes: [], toc: null,
+    scale: 1, token: 0, renderTok: 0, audioCache: new Map(), editing: null,
+  };
+  const audio = new Audio();
+  audio.preservesPitch = true;
+
+  const toast = (m) => { const el = $("toast"); el.textContent = m; el.classList.add("show"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 1800); };
+  const sents = () => (S.pageData ? S.pageData.sentences : []);
+  const readable = (s) => s && !s.skip;
+
+  // ---------- load ----------
+  async function init() {
+    S.book = await api(B + "/info");
+    if (!LANG) LANG = S.book.language === "zh" ? "zh" : (S.book.language === "en" ? "en" : ((navigator.language || "").startsWith("zh") ? "zh" : "en"));
+    applyLang();
+    document.title = S.book.title;
+    $("pagetotal").textContent = "/ " + S.book.pages;
+    if (S.book.zotero_uri) $("btn-zotero").style.display = "";
+    if (S.book.obsidian_uri) $("btn-obsidian").style.display = "";
+    if (!S.book.dict_ok) { $("btn-dict").title = t("查词需要 macOS 自带词典"); }
+    $("pageno").max = S.book.pages;
+    S.voice = localStorage.getItem("voice") || S.book.default_voice;
+    S.rate = parseFloat(localStorage.getItem("rate") || "1");
+    $("rate").value = S.rate; $("rateval").textContent = S.rate.toFixed(2) + "×";
+    loadVoices();
+    loadToc();
+    loadChat().catch(() => {});
+    S.pdf = await pdfjsLib.getDocument("/pdf/" + SLUG).promise;
+    await refreshNotes();
+    const prog = S.book.progress || {};
+    const local = JSON.parse(localStorage.getItem("progress:" + SLUG) || "null");
+    const start = (local && local.t > (prog.t || 0)) ? local : prog;
+    await gotoPage(start.page || 1, start.sid ?? -1, false);
+    window.addEventListener("resize", () => renderPage(false));
+  }
+
+  async function loadToc() {
+    const nav = $("toc");
+    if (localStorage.getItem("toc") === "hide") nav.classList.add("hidden"); else $("btn-toc").classList.add("on");
+    try { S.toc = await api(B + "/toc"); } catch (e) { S.toc = []; }
+    renderTocList();
+  }
+  function renderTocList() {
+    const nav = $("toc"); nav.innerHTML = "";
+    if (!S.toc || !S.toc.length) { nav.innerHTML = '<div class="muted" style="padding:10px"></div>'; nav.firstChild.textContent = t("这本 PDF 没有书签，也没猜出标题"); return; }
+    if (S.toc[0].auto) { const h = document.createElement("div"); h.className = "muted"; h.style.padding = "4px 8px"; h.textContent = t("没有书签，目录是按字体猜的"); nav.appendChild(h); }
+    S.toc.forEach((tc, i) => {
+      const d = document.createElement("div"); d.className = "t l" + tc.level; d.dataset.i = i;
+      const pg = document.createElement("span"); pg.className = "pg"; pg.textContent = tc.page;
+      d.textContent = tc.title; d.appendChild(pg); d.title = tc.title;
+      d.onclick = () => gotoHeading(tc);
+      nav.appendChild(d);
+    });
+    markToc();
+  }
+  const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  async function gotoHeading(tc) {
+    const wasPlaying = S.playing;
+    await gotoPage(tc.page, -1, false);
+    const key = norm(tc.title).split(" ").slice(0, 5).join(" ");
+    const hit = sents().find(x => norm(x.text).startsWith(key));
+    if (hit) { S.cur = hit.id; markCurrent(); saveProgress(); }
+    if (wasPlaying) { S.playing = true; playCurrent(); }
+  }
+  function markToc() {
+    if (!S.toc || !S.toc.length) return;
+    let idx = -1;
+    S.toc.forEach((tc, i) => { if (tc.page <= S.page) idx = i; });
+    document.querySelectorAll(".t.cur").forEach(e => e.classList.remove("cur"));
+    if (idx >= 0) { const el = document.querySelector(`.t[data-i="${idx}"]`); if (el) { el.classList.add("cur"); el.scrollIntoView({ block: "nearest" }); } }
+  }
+  function toggleToc() {
+    const nav = $("toc"); nav.classList.toggle("hidden");
+    const shown = !nav.classList.contains("hidden");
+    $("btn-toc").classList.toggle("on", shown);
+    localStorage.setItem("toc", shown ? "show" : "hide");
+    renderPage(false);
+  }
+
+  async function loadVoices() {
+    const sel = $("voice");
+    const put = (list) => {
+      sel.innerHTML = "";
+      list.forEach(v => { const o = document.createElement("option"); o.value = v.name; o.textContent = v.name.replace("Neural", "") + " (" + v.gender[0] + ")"; sel.appendChild(o); });
+      sel.value = S.voice;
+    };
+    put([{ name: S.voice, gender: "?" }]);
+    try { put(await api("/api/voices")); } catch (e) { console.warn("voices", e); }
+  }
+
+  // ---------- page rendering ----------
+  async function gotoPage(n, sid = -1, autoplay = S.playing) {
+    n = Math.max(1, Math.min(S.book.pages, n));
+    S.token++;
+    audio.pause();
+    S.page = n;
+    $("pageno").value = n;
+    $("pagenav-label").textContent = n + " / " + S.book.pages;
+    $("btn-prev-p2").disabled = n <= 1; $("btn-next-p2").disabled = n >= S.book.pages;
+    S.pageData = await api(B + "/page/" + n);
+    hideDict(true); D.rect = null;
+    if (sid === -3) sid = firstReadable(0, true);   // sequential page turn: the cross-page sentence was already read
+    if (sid < 0) sid = firstReadable(0);
+    S.cur = sid;
+    await renderPage(true);
+    markCurrent();
+    markToc();
+    saveProgress();
+    if (autoplay) playCurrent();
+  }
+
+  function firstReadable(from, skipContinued = false) { const ss = sents(); for (let i = from; i < ss.length; i++) if (readable(ss[i]) && !(skipContinued && ss[i].continued)) return i; return -1; }
+  function lastReadable() { const ss = sents(); for (let i = ss.length - 1; i >= 0; i--) if (readable(ss[i])) return i; return -1; }
+
+  let renderQueue = Promise.resolve();
+  function renderPage(full) {   // serialised: each render waits for the previous one; superseded renders skip their layers
+    const tok = ++S.renderTok;
+    document.body.style.cursor = "progress"; $("title").style.opacity = .5;
+    const p = renderQueue.then(() => renderPageInner(tok)).catch(e => console.error("render", e))
+      .finally(() => { if (tok === S.renderTok) { document.body.style.cursor = ""; $("title").style.opacity = 1; } });
+    renderQueue = p;
+    return p;
+  }
+  async function renderPageInner(tok) {
+    if (tok !== S.renderTok) return;
+    const page = await S.pdf.getPage(S.page);
+    const wrap = $("pdfwrap");
+    const avail = wrap.clientWidth - 36;
+    const vp1 = page.getViewport({ scale: 1 });
+    const cssScale = Math.min(avail / vp1.width, 1.6);
+    const dpr = window.devicePixelRatio || 1;
+    const vp = page.getViewport({ scale: cssScale * dpr });
+    const canvas = $("canvas");
+    canvas.width = vp.width; canvas.height = vp.height;
+    canvas.style.width = (vp.width / dpr) + "px"; canvas.style.height = (vp.height / dpr) + "px";
+    $("pagebox").style.width = canvas.style.width; $("pagebox").style.height = canvas.style.height;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+    if (tok !== S.renderTok) return;
+    S.scale = (vp.width / dpr) / S.pageData.width;
+    drawSentLayer();
+    drawHlLayer();
+  }
+
+  function rectDiv(r, cls) {
+    const d = document.createElement("div");
+    d.className = cls;
+    const s = S.scale, pad = 1.5;
+    d.style.left = (r[0] * s - pad) + "px"; d.style.top = (r[1] * s - pad) + "px";
+    d.style.width = ((r[2] - r[0]) * s + pad * 2) + "px"; d.style.height = ((r[3] - r[1]) * s + pad * 2) + "px";
+    return d;
+  }
+
+  function drawSentLayer() {
+    const layer = $("sent-layer"); layer.innerHTML = "";
+    sents().forEach(s => s.rects.forEach(r => {
+      const d = rectDiv(r, "sent" + (s.skip ? " skip" : ""));
+      d.dataset.sid = s.id; d.title = s.text;
+      d.addEventListener("click", (ev) => onSentenceClick(s.id, ev));
+      layer.appendChild(d);
+    }));
+  }
+
+  function drawHlLayer() {
+    const layer = $("hl-layer"); layer.innerHTML = "";
+    S.notes.filter(n => n.page === S.page).forEach(n => n.rects.forEach(r => {
+      const d = rectDiv(r, "hl"); d.title = n.note || t("（点击写感想）");
+      d.addEventListener("click", (ev) => { ev.stopPropagation(); openEditor(n); });
+      layer.appendChild(d);
+    }));
+  }
+
+  function updateAiCtx() {
+    const el = $("ai-ctx"); if (!el) return;
+    const s = sents()[S.cur];
+    el.classList.toggle("off", !$("ai-sent").checked);
+    el.textContent = s ? t("当前：p.{page} · “{text}”", { page: S.page, text: s.text }) : t("当前：p.{page} · （还没选中句子，点 PDF 上的一句）", { page: S.page });
+  }
+  function markCurrent() {
+    updateAiCtx();
+    document.querySelectorAll(".sent.now").forEach(e => e.classList.remove("now"));
+    if (S.cur < 0) return;
+    document.querySelectorAll(`[data-sid="${S.cur}"]`).forEach(e => e.classList.add("now"));
+    const first = document.querySelector(`.sent[data-sid="${S.cur}"]`);
+    if (first) first.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  let progTimer;
+  function saveProgress() {
+    clearTimeout(progTimer);
+    const p = { page: S.page, sid: S.cur, t: Date.now() };
+    localStorage.setItem("progress:" + SLUG, JSON.stringify(p));
+    progTimer = setTimeout(() => post(B + "/progress", p).catch(() => {}), 800);
+  }
+
+  // ---------- playback ----------
+  function audioKey(page, sid) { return S.voice + "|" + page + "|" + sid; }
+  function getAudio(page, sid, text) {
+    const k = audioKey(page, sid);
+    if (!S.audioCache.has(k)) {
+      const p = fetch("/api/tts?voice=" + encodeURIComponent(S.voice) + "&text=" + encodeURIComponent(text))
+        .then(r => { if (!r.ok) throw new Error("tts " + r.status); return r.blob(); })
+        .then(b => URL.createObjectURL(b));
+      p.catch(() => S.audioCache.delete(k));
+      S.audioCache.set(k, p);
+    }
+    return S.audioCache.get(k);
+  }
+  function prefetch() {
+    const ss = sents(); let n = 0;
+    for (let i = S.cur + 1; i < ss.length && n < 3; i++) if (readable(ss[i])) { getAudio(S.page, i, ss[i].text); n++; }
+  }
+
+  async function playCurrent() {
+    const s = sents()[S.cur];
+    if (!s) return;
+    S.playing = true; $("btn-play").textContent = "⏸";
+    const tok = ++S.token;
+    try {
+      const url = await getAudio(S.page, S.cur, s.text);
+      if (tok !== S.token) return;
+      audio.src = url; audio.playbackRate = S.rate;
+      await audio.play();
+      prefetch();
+    } catch (e) {
+      if (tok !== S.token) return;
+      console.error(e); toast(t("语音获取失败，2 秒后重试")); setTimeout(() => { if (tok === S.token && S.playing) playCurrent(); }, 2000);
+    }
+  }
+  audio.addEventListener("ended", () => { if (S.playing) next(true); });
+
+  function pause() { S.playing = false; S.token++; audio.pause(); $("btn-play").textContent = "▶"; }
+  function toggle() { if (S.playing) pause(); else { if (S.cur < 0) S.cur = firstReadable(0); markCurrent(); playCurrent(); } }
+
+  async function next(auto = false) {
+    const ss = sents(); let i = S.cur + 1;
+    while (i < ss.length && !readable(ss[i])) i++;
+    if (i < ss.length) { S.cur = i; markCurrent(); saveProgress(); if (S.playing) playCurrent(); }
+    else if (S.page < S.book.pages) { await gotoPage(S.page + 1, -3, S.playing); }
+    else if (auto) { pause(); toast(t("读完了 🎉")); }
+  }
+  async function prev() {
+    const ss = sents(); let i = S.cur - 1;
+    while (i >= 0 && !readable(ss[i])) i--;
+    if (i >= 0) { S.cur = i; markCurrent(); saveProgress(); if (S.playing) playCurrent(); }
+    else if (S.page > 1) { await gotoPage(S.page - 1, -2, S.playing); S.cur = lastReadable(); markCurrent(); if (S.playing) playCurrent(); }
+  }
+
+  function onSentenceClick(sid, ev) {
+    if (ev.shiftKey && S.cur >= 0) { highlightRange(Math.min(S.cur, sid), Math.max(S.cur, sid)); return; }
+    S.cur = sid; markCurrent(); saveProgress();
+    if (!S.playing) { S.playing = true; }
+    playCurrent();
+  }
+
+  // ---------- highlights & notes ----------
+  async function refreshNotes() {
+    S.notes = await api(B + "/notes");
+    $("notecount").textContent = S.notes.length ? "(" + S.notes.length + ")" : "";
+    renderNotesPane();
+    if (S.pageData) { drawHlLayer(); markCurrent(); }
+  }
+
+  function noteOfSid(sid) { return S.notes.find(n => n.page === S.page && n.sids.includes(sid)); }
+
+  async function toggleHighlight(sid) {
+    const ex = noteOfSid(sid);
+    if (ex) {
+      if (ex.note && !confirm(t("这条高亮已有感想，一起删掉吗？"))) return;
+      await api(B + "/notes/" + ex.id, { method: "DELETE" }); toast(t("已取消高亮"));
+    } else {
+      await createHighlight([sid]); toast(t("已高亮，写进笔记了"));
+    }
+    await refreshNotes();
+  }
+
+  async function createHighlight(sids, note = "") {
+    const ss = sents();
+    const quote = sids.map(i => ss[i].text).join(" ");
+    const rects = sids.flatMap(i => ss[i].rects);
+    return post(B + "/notes", { page: S.page, quote, rects, sids, note });
+  }
+
+  async function highlightRange(a, b) {
+    const sids = []; for (let i = a; i <= b; i++) if (!noteOfSid(i) && !sents()[i].skip) sids.push(i);
+    if (!sids.length) return;
+    const n = await createHighlight(sids); await refreshNotes(); toast(t("高亮了 {n} 句", { n: sids.length })); openEditor(S.notes.find(x => x.id === n.id) || n);
+  }
+
+  async function noteFor(sid) {
+    let n = noteOfSid(sid);
+    if (!n) { const c = await createHighlight([sid]); await refreshNotes(); n = S.notes.find(x => x.id === c.id) || c; }
+    openEditor(n);
+  }
+
+  function openEditor(n) {
+    S.editing = n;
+    $("ed-quote").textContent = "p." + n.page + "  " + n.quote;
+    $("ed-text").value = n.note || "";
+    $("ed-hint").textContent = t("会写进 {path}", { path: S.book.note_path.split("/").slice(-2).join("/") });
+    $("editor").classList.add("open");
+    $("ed-text").focus();
+  }
+  function closeEditor() { S.editing = null; $("editor").classList.remove("open"); $("ed-text").blur(); }
+  async function saveEditor() {
+    if (!S.editing) return;
+    await post(B + "/notes/" + S.editing.id, { note: $("ed-text").value }, "PUT");
+    toast(t("感想已保存")); closeEditor(); await refreshNotes();
+  }
+
+  function renderNotesPane() {
+    const pane = $("pane-notes"); pane.innerHTML = "";
+    if (!S.notes.length) { pane.innerHTML = '<div class="muted" style="padding:12px">' + t("还没有摘录。读到喜欢的句子按 <kbd>H</kbd> 高亮，按 <kbd>N</kbd> 写感想。") + '</div>'; return; }
+    S.notes.forEach(n => {
+      const d = document.createElement("div"); d.className = "note"; d.dataset.id = n.id;
+      const pg = document.createElement("div"); pg.className = "pg"; pg.textContent = "p." + n.page + " ↗";
+      pg.onclick = () => gotoPage(n.page, n.sids[0] ?? -1, false);
+      const q = document.createElement("div"); q.className = "q"; q.textContent = n.quote;
+      const nt = document.createElement("div"); nt.className = "n"; nt.textContent = n.note;
+      const row = document.createElement("div"); row.className = "row";
+      const b1 = document.createElement("button"); b1.textContent = n.note ? t("改感想") : t("写感想"); b1.onclick = () => openEditor(n);
+      const b2 = document.createElement("button"); b2.textContent = t("删除");
+      b2.onclick = async () => { if (!confirm(t("删除这条摘录（含感想）？"))) return; await api(B + "/notes/" + n.id, { method: "DELETE" }); await refreshNotes(); };
+      row.append(b1, b2);
+      d.append(pg, q, nt, row); pane.appendChild(d);
+    });
+  }
+
+  // ---------- ask AI ----------
+  const AI = { busy: false, models: [] };
+  const MODEL_TAG = { haiku: "最快", sonnet: "均衡", opus: "强", fable: "最强" };
+  function labelModels() {
+    const sel = $("ai-model"); const cur = sel.value;
+    sel.innerHTML = "";
+    AI.models.forEach(m => { const o = document.createElement("option"); o.value = m.id; o.textContent = m.label + (MODEL_TAG[m.id] ? " · " + t(MODEL_TAG[m.id]) : ""); sel.appendChild(o); });
+    sel.value = cur || localStorage.getItem("ai-model") || "sonnet";
+  }
+  async function loadChat() {
+    const d = await api(B + "/chat");
+    AI.models = d.models;
+    labelModels();
+    $("ai-model").value = localStorage.getItem("ai-model") || "sonnet";
+    if (!d.claude_ok) $("ai-hint").textContent = t("找不到 claude 命令行，请先装 Claude Code");
+    const box = $("ai-msgs"); box.innerHTML = "";
+    d.messages.forEach(m => addMsg(m.role, m.text, m));
+    box.scrollTop = box.scrollHeight;
+  }
+  function renderMd(el, text) {
+    el.dataset.raw = text;
+    if (window.marked && window.DOMPurify) {
+      try { el.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true })); return; } catch (e) {}
+    }
+    el.textContent = text;
+  }
+  function addMsg(role, text, meta = {}) {
+    const box = $("ai-msgs");
+    const d = document.createElement("div"); d.className = "msg " + (role === "user" ? "user" : "ai") + (meta.error ? " err" : "");
+    if (role === "user") { d.textContent = text; }
+    else {
+      const body = document.createElement("div"); body.className = "t"; if (meta.error) body.textContent = meta.error; else renderMd(body, text); d.appendChild(body);
+      const mt = document.createElement("div"); mt.className = "meta";
+      const lab = document.createElement("span"); lab.textContent = (meta.model || "") + (meta.page ? " · p." + meta.page : ""); mt.appendChild(lab);
+      const save = document.createElement("button"); save.textContent = t("存为感想"); save.title = t("把这问答存到当前句的摘录感想里");
+      save.onclick = () => saveQA(d);
+      const spk = document.createElement("button"); spk.textContent = "🔊"; spk.title = t("读出回答");
+      spk.onclick = () => { const a = new Audio("/api/tts?voice=" + encodeURIComponent(S.voice) + "&text=" + encodeURIComponent((body.dataset.raw || body.textContent).slice(0, 1500))); a.playbackRate = S.rate; a.play(); };
+      mt.append(save, spk); d.appendChild(mt);
+    }
+    box.appendChild(d); box.scrollTop = box.scrollHeight;
+    return d;
+  }
+  async function saveQA(aiDiv) {
+    const q = aiDiv.previousElementSibling && aiDiv.previousElementSibling.classList.contains("user") ? aiDiv.previousElementSibling.textContent : "";
+    const a = aiDiv.querySelector(".t").dataset.raw || aiDiv.querySelector(".t").textContent;
+    if (S.cur < 0) { toast(t("先选一句")); return; }
+    let n = noteOfSid(S.cur);
+    const note = (n && n.note ? n.note + "\n\n" : "") + t("问：") + q + "\n" + t("答：") + a;
+    if (!n) { await createHighlight([S.cur], note); } else { await post(B + "/notes/" + n.id, { note }, "PUT"); }
+    await refreshNotes(); toast(t("已存进笔记"));
+  }
+  async function sendAsk() {
+    const q = $("ai-q").value.trim();
+    if (!q || AI.busy) return;
+    AI.busy = true; $("ai-send").disabled = true; $("ai-q").value = "";
+    const model = $("ai-model").value; localStorage.setItem("ai-model", model);
+    addMsg("user", q);
+    const d = addMsg("ai", "", { model, page: S.page }); const body = d.querySelector(".t"); body.classList.add("typing");
+    const toolNote = document.createElement("div"); toolNote.className = "muted"; toolNote.style.cssText = "font-size:11px;display:none;margin-bottom:4px"; d.insertBefore(toolNote, body);
+    try {
+      const r = await fetch(B + "/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q, model, page: S.page, sid: S.cur, include_page: $("ai-page").checked, include_sentence: $("ai-sent").checked }) });
+      const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        // tool-use notices (\x1f{...}\x1f) are shown separately, not in the answer
+        buf = buf.replace(/\x1f(\{.*?\})\x1f/g, (m, j) => { try { const o = JSON.parse(j); toolNote.textContent = t("正在翻书… ({tool})", { tool: o.tool }); toolNote.style.display = ""; } catch (e) {} return ""; });
+        const i = buf.indexOf("\x1e");
+        renderMd(body, i >= 0 ? buf.slice(0, i).trimEnd() : buf);
+        $("ai-msgs").scrollTop = $("ai-msgs").scrollHeight;
+        if (i >= 0) { try { const meta = JSON.parse(buf.slice(i + 1)); if (meta.error) { d.classList.add("err"); body.textContent = meta.error; } } catch (e) {} }
+        if (i >= 0) body.classList.remove("typing");
+      }
+    } catch (e) { d.classList.add("err"); body.textContent = t("请求失败：") + e.message; }
+    body.classList.remove("typing"); toolNote.remove();
+    AI.busy = false; $("ai-send").disabled = false; $("ai-q").focus();
+  }
+  // ---- quick questions ----
+  function quickList() { try { const v = JSON.parse(localStorage.getItem("ai-quick") || "null"); if (Array.isArray(v) && v.length) return v; } catch (e) {} return [t("这句话是什么意思？")]; }
+  function renderQuick() {
+    const box = $("ai-quick"); box.innerHTML = "";
+    quickList().forEach((q, i) => {
+      const b = document.createElement("button"); if (i < 9) { const k = document.createElement("span"); k.className = "k"; k.textContent = i + 1; b.appendChild(k); }
+      b.appendChild(document.createTextNode(q));
+      b.title = t("点一下就带着当前句发送") + (i < 9 ? t("（数字键 {n}）", { n: i + 1 }) : ""); b.onclick = () => quickAsk(i); box.appendChild(b);
+    });
+    const ed = document.createElement("button"); ed.className = "edit"; ed.textContent = t("✎ 改"); ed.title = t("编辑快捷问题");
+    ed.onclick = () => { $("ai-quick-text").value = quickList().join("\n"); $("ai-quick-edit").style.display = "block"; $("ai-quick-text").focus(); };
+    box.appendChild(ed);
+  }
+  function quickAsk(i) {
+    const q = quickList()[i]; if (!q) return;
+    document.querySelector('[data-pane="pane-ai"]').click();
+    if (AI.busy) { toast(t("上一条还在回答")); return; }
+    $("ai-q").value = q; sendAsk();
+  }
+  $("ai-quick-save").onclick = () => { const v = $("ai-quick-text").value.split("\n").map(x => x.trim()).filter(Boolean); if (v.length) localStorage.setItem("ai-quick", JSON.stringify(v)); else localStorage.removeItem("ai-quick"); $("ai-quick-edit").style.display = "none"; renderQuick(); toast(t("快捷问题已保存")); };
+  $("ai-quick-cancel").onclick = () => { $("ai-quick-edit").style.display = "none"; };
+
+  $("ai-send").onclick = sendAsk;
+  async function uploadFiles(files) {
+    for (const f of files) {
+      try {
+        const r = await fetch("/api/upload", { method: "POST", headers: { "X-Filename": encodeURIComponent(f.name) }, body: f });
+        const j = await r.json();
+        const q = $("ai-q"); q.value = (q.value ? q.value.replace(/\s*$/, "") + "\n" : "") + t("文件：") + j.path + "\n";
+        toast(t("已附上 {name}", { name: f.name }));
+      } catch (e) { toast(t("上传失败：") + e.message); }
+    }
+    $("ai-q").focus();
+  }
+  $("ai-attach").onclick = () => $("ai-file").click();
+  $("ai-file").onchange = (e) => { uploadFiles([...e.target.files]); e.target.value = ""; };
+  $("pane-ai").addEventListener("dragover", (e) => { e.preventDefault(); });
+  $("pane-ai").addEventListener("drop", (e) => { e.preventDefault(); if (e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]); });
+  $("ai-sent").onchange = updateAiCtx;
+  $("ai-ctx").onclick = () => { if (S.cur >= 0) { markCurrent(); } };
+  // IME: Enter while composing (e.g. pinyin candidates) selects a character, it must not send
+  let composing = false, composedAt = 0;
+  $("ai-q").addEventListener("compositionstart", () => { composing = true; });
+  $("ai-q").addEventListener("compositionend", () => { composing = false; composedAt = Date.now(); });
+  $("ai-q").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.target.blur(); return; }
+    if (e.key !== "Enter") return;
+    if (e.metaKey || e.ctrlKey) { e.preventDefault(); sendAsk(); return; }          // ⌘+Enter always sends
+    if (e.shiftKey) return;                                                           // Shift+Enter: newline
+    if (e.isComposing || e.keyCode === 229 || composing || Date.now() - composedAt < 80) return;
+    e.preventDefault(); sendAsk();
+  });
+  $("ai-new").onclick = async () => { if (!confirm(t("开始新对话？旧的记录还会留在下面。"))) return; await post(B + "/chat/reset", {}); toast(t("新对话，AI 不再记得之前的内容")); };
+  document.querySelector('[data-pane="pane-ai"]').addEventListener("click", () => { if (!AI.models.length) loadChat().catch(e => toast(e.message)); setTimeout(() => $("ai-q").focus(), 50); });
+
+  // ---------- dictionary on hover ----------
+  const D = { on: localStorage.getItem("dict") !== "off", timer: null, word: null, rect: null, hideT: null };
+  $("btn-dict").classList.toggle("on", D.on);
+  function setDict(on, quiet) { D.on = on; $("btn-dict").classList.toggle("on", on); localStorage.setItem("dict", on ? "on" : "off"); if (!on) hideDict(true); if (!quiet) toast(on ? t("取词已打开（D 键或 📖 可关）") : t("取词已关闭（D 键或 📖 可开）")); }
+  function wordAt(x, y) {   // x,y in pagebox pixels
+    const ws = (S.pageData && S.pageData.words) || [], s = S.scale;
+    for (const w of ws) if (x >= w[0] * s - 1 && x <= w[2] * s + 1 && y >= w[1] * s - 1 && y <= w[3] * s + 1) return w;
+    return null;
+  }
+  $("pagebox").addEventListener("mousemove", (e) => {
+    if (!D.on) return;
+    if (e.target.closest("#dict")) { clearTimeout(D.timer); clearTimeout(D.hideT); D.rect = null; return; }  // on the card: never look anything up
+    const r = $("pagebox").getBoundingClientRect();
+    const w = wordAt(e.clientX - r.left, e.clientY - r.top);
+    if (w === D.rect) return;
+    D.rect = w; clearTimeout(D.timer);
+    if (!w) { scheduleHide(); return; }
+    if (D.word && w[4] === D.word) { clearTimeout(D.hideT); return; }   // back on the word being shown: keep it
+    D.timer = setTimeout(() => { if (D.rect === w) showDict(w); }, 550);
+  });
+  $("pagebox").addEventListener("mouseleave", () => { clearTimeout(D.timer); D.rect = null; scheduleHide(); });
+  $("dict").addEventListener("mouseenter", () => { clearTimeout(D.timer); clearTimeout(D.hideT); D.rect = null; });
+  $("dict").addEventListener("mouseleave", () => scheduleHide());
+  function scheduleHide() { clearTimeout(D.hideT); D.hideT = setTimeout(() => hideDict(), 600); }
+  function hideDict(force) { $("dict").classList.remove("show"); $("wordhits").innerHTML = ""; D.word = null; }
+  function drawHits(list) {
+    const box = $("wordhits"); box.innerHTML = "";
+    const s = S.scale;
+    list.forEach(w => { const h = document.createElement("div"); h.className = "wordhit";
+      h.style.left = (w[0] * s - 1) + "px"; h.style.top = (w[1] * s - 1) + "px";
+      h.style.width = ((w[2] - w[0]) * s + 2) + "px"; h.style.height = ((w[3] - w[1]) * s + 2) + "px"; box.appendChild(h); });
+  }
+  async function showDict(w) {
+    try { await showDictInner(w); } catch (e) { console.error("dict", e); }
+  }
+  async function showDictInner(w) {
+    const word = w[4], sid = w[5], off = w[6];
+    drawHits([w]);
+    D.word = word; clearTimeout(D.hideT);
+    let d;
+    try { d = await api(B + "/define?page=" + S.page + "&sid=" + sid + "&off=" + off); } catch (e) { d = { word, found: false }; }
+    if (D.word !== word) return;
+    if (d.range) {   // highlight every word of the phrase
+      const hits = (S.pageData.words || []).filter(x => x[5] === sid && x[6] >= d.range[0] && x[6] < d.range[1]);
+      if (hits.length) drawHits(hits);
+    }
+    const box = $("dict"); box.innerHTML = "";
+    const say = (txt) => { const a = new Audio("/api/tts?voice=" + encodeURIComponent(S.voice) + "&text=" + encodeURIComponent(txt)); a.play(); };
+    if (d.phrase) {
+      const ph = document.createElement("div"); ph.className = "ph";
+      const row = document.createElement("div"); row.className = "row";
+      const pt = document.createElement("span"); pt.className = "pt"; pt.textContent = (d.phrase.kind === "separated" ? t("短语动词 ") : t("短语 ")) + d.phrase.text;
+      const spk = document.createElement("button"); spk.textContent = "🔊"; spk.onclick = (e) => { e.stopPropagation(); say(d.phrase.text); };
+      row.append(pt, spk); ph.appendChild(row);
+      if (d.phrase.note) { const n = document.createElement("div"); n.className = "note"; n.textContent = d.phrase.note; ph.appendChild(n); }
+      const b = document.createElement("div"); b.className = "body"; b.textContent = d.phrase.body; ph.appendChild(b);
+      box.appendChild(ph);
+    }
+    const row = document.createElement("div"); row.className = "row";
+    const ww = document.createElement("span"); ww.className = "w"; ww.textContent = d.word || word;
+    const spk = document.createElement("button"); spk.textContent = "🔊"; spk.title = t("读这个词");
+    spk.onclick = (e) => { e.stopPropagation(); say(d.word || word); };
+    row.append(ww, spk);
+    if (S.book && S.book.dict_ok) {
+      const app = document.createElement("button"); app.textContent = t("词典 App"); app.title = t("在 macOS 词典里打开");
+      app.onclick = (e) => { e.stopPropagation(); location.href = "dict://" + encodeURIComponent(d.phrase ? d.phrase.text : (d.word || word)); };
+      row.appendChild(app);
+    }
+    let wordBox = box;
+    if (d.phrase) { const det = document.createElement("details"); const sum = document.createElement("summary"); sum.textContent = t("单词本身：") + (d.word || word); det.appendChild(sum); box.appendChild(det); wordBox = det; }
+    wordBox.appendChild(row);
+    if (d.found) {
+      const h = document.createElement("div"); h.className = "head"; h.textContent = (d.head || "").replace(/^\S+\s*/, ""); wordBox.appendChild(h);
+      const b = document.createElement("div"); b.className = "body"; b.textContent = d.body || ""; wordBox.appendChild(b);
+    } else { const n = document.createElement("div"); n.className = "none"; n.textContent = (S.book && !S.book.dict_ok) ? t("查词需要 macOS 自带词典") : t("词典里没有这个词"); wordBox.appendChild(n); }
+    const pb = $("pagebox"), pw = pb.clientWidth, ph2 = pb.clientHeight, s2 = S.scale;
+    let left = Math.min(w[0] * s2, pw - 372), top = w[3] * s2 + 2;
+    box.style.left = Math.max(0, left) + "px"; box.style.top = top + "px";
+    box.classList.add("show");
+    if (top + box.offsetHeight > ph2 + 20) box.style.top = Math.max(0, w[1] * s2 - box.offsetHeight - 2) + "px";
+  }
+  $("btn-dict").onclick = () => setDict(!D.on);
+
+  // ---------- controls ----------
+  $("btn-play").onclick = toggle;
+  $("btn-next-s").onclick = () => next();
+  $("btn-prev-s").onclick = () => prev();
+  $("btn-next-p").onclick = () => gotoPage(S.page + 1);
+  $("btn-prev-p").onclick = () => gotoPage(S.page - 1);
+  $("btn-prev-p2").onclick = () => gotoPage(S.page - 1);
+  $("btn-next-p2").onclick = () => gotoPage(S.page + 1);
+  $("btn-lang").onclick = () => setLang(LANG === "en" ? "zh" : "en");
+  // wheel: past the bottom -> next page (from the top); past the top -> previous page (at the bottom)
+  let wheelAcc = 0, wheelT = 0, flipAt = 0, edgeSince = 0;
+  const WHEEL_NEED = 900;      // how much extra scrolling at the edge turns the page (bigger = less sensitive)
+  const EDGE_SETTLE = 500;     // ms to rest at the edge before counting
+  $("pdfwrap").addEventListener("scroll", () => {
+    const w = $("pdfwrap");
+    const edge = w.scrollTop <= 0 || w.scrollTop + w.clientHeight >= w.scrollHeight - 2;
+    if (!edge) edgeSince = 0; else if (!edgeSince) edgeSince = Date.now();
+  });
+  $("pdfwrap").addEventListener("wheel", (e) => {
+    const w = $("pdfwrap");
+    if (Date.now() - flipAt < 900) { e.preventDefault(); wheelAcc = 0; return; }  // cooldown after a flip: swallow momentum
+    if (!edgeSince || Date.now() - edgeSince < EDGE_SETTLE) { wheelAcc = 0; return; }
+    const atBottom = w.scrollTop + w.clientHeight >= w.scrollHeight - 2;
+    const atTop = w.scrollTop <= 0;
+    const now = Date.now();
+    if (now - wheelT > 300) wheelAcc = 0;
+    wheelT = now;
+    if ((e.deltaY > 0 && atBottom) || (e.deltaY < 0 && atTop)) {
+      wheelAcc += e.deltaY;
+      if (wheelAcc > WHEEL_NEED && S.page < S.book.pages) { wheelAcc = 0; flipAt = Date.now(); gotoPage(S.page + 1, -1, S.playing).then(() => { w.scrollTop = 0; flipAt = Date.now(); }); }
+      else if (wheelAcc < -WHEEL_NEED && S.page > 1) { wheelAcc = 0; flipAt = Date.now(); gotoPage(S.page - 1, -1, S.playing).then(() => { w.scrollTop = w.scrollHeight; flipAt = Date.now(); }); }
+    } else wheelAcc = 0;
+  }, { passive: false });
+  $("pageno").onchange = (e) => gotoPage(parseInt(e.target.value) || 1);
+  $("rate").oninput = (e) => { S.rate = parseFloat(e.target.value); audio.playbackRate = S.rate; $("rateval").textContent = S.rate.toFixed(2) + "×"; localStorage.setItem("rate", S.rate); };
+  $("voice").onchange = (e) => { S.voice = e.target.value; localStorage.setItem("voice", S.voice); S.audioCache.clear(); if (S.playing) playCurrent(); };
+  $("btn-hl").onclick = () => S.cur >= 0 && toggleHighlight(S.cur);
+  $("btn-note").onclick = () => S.cur >= 0 && noteFor(S.cur);
+  $("btn-obsidian").onclick = () => { if (S.book.obsidian_uri) location.href = S.book.obsidian_uri; };
+  $("btn-zotero").onclick = () => { location.href = S.book.zotero_uri; };
+  $("btn-help").onclick = () => $("help").classList.toggle("show");
+  $("btn-toc").onclick = toggleToc;
+  $("ed-save").onclick = saveEditor;
+  $("ed-cancel").onclick = closeEditor;
+  $("ed-text").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); saveEditor(); }
+    if (e.key === "Escape") { e.preventDefault(); closeEditor(); }
+  });
+  document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+    document.querySelectorAll(".tabs button, .pane").forEach(x => x.classList.remove("active"));
+    b.classList.add("active"); $(b.dataset.pane).classList.add("active");
+  });
+  // reload notes when switching to the highlights pane or refocusing, to pick up edits made in Obsidian
+  document.querySelector('[data-pane="pane-notes"]').addEventListener("click", () => refreshNotes());
+  window.addEventListener("focus", () => refreshNotes().catch(() => {}));
+
+  document.addEventListener("keydown", (e) => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "input" || tag === "select") return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key;
+    if (k === " ") { e.preventDefault(); toggle(); }
+    else if (k === "ArrowRight") { e.preventDefault(); next(); }
+    else if (k === "ArrowLeft") { e.preventDefault(); prev(); }
+    else if (k === "]") gotoPage(S.page + 1);
+    else if (k === "[") gotoPage(S.page - 1);
+    else if (k === "h" || k === "H") S.cur >= 0 && toggleHighlight(S.cur);
+    else if (k === "n" || k === "N") { e.preventDefault(); S.cur >= 0 && noteFor(S.cur); }
+    else if (k === "-" || k === "=" || k === "+") { const r = $("rate"); r.value = (parseFloat(r.value) + (k === "-" ? -0.1 : 0.1)).toFixed(2); r.oninput({ target: r }); }
+    else if (k === "?") $("help").classList.toggle("show");
+    else if (k === "t" || k === "T") { toggleToc(); toast($("toc").classList.contains("hidden") ? t("目录已收起（T）") : t("目录已展开（T）")); }
+    else if (k === "d" || k === "D") setDict(!D.on);
+    else if (k === "a" || k === "A") { e.preventDefault(); document.querySelector('[data-pane="pane-ai"]').click(); }
+    else if (/^[1-9]$/.test(k)) { e.preventDefault(); quickAsk(parseInt(k) - 1); }
+    else if (k === "Escape") { $("help").classList.remove("show"); closeEditor(); }
+  });
+
+  applyLang();
+  init().catch(e => { console.error(e); $("title").textContent = t("载入失败: ") + e.message; });
+})();
+</script>
+</body>
+</html>

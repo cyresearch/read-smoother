@@ -1,0 +1,23 @@
+# private: your own configuration and files
+config.json
+profile.md
+templates/*.local.md
+notes/
+
+# private: reading progress, highlights, AI chats, uploads, exported book text
+data/
+demo/data/
+
+# books are copyrighted; only the public-domain demo PDF is tracked
+books/*
+!books/.gitkeep
+
+# generated
+cache/
+__pycache__/
+.venv/
+server.log
+.DS_Store
+
+# the demo config is a tracked example (root config.json stays private)
+!demo/config.json

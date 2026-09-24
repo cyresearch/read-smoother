@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Read Smoother</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg: #f3f1ec; --panel: #fffdf9; --ink: #2a2723; --muted: #7a746b; --line: #e3ded4; --accent: #b8542e; --btn: #ece8df; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 18px; display: flex; align-items: center; gap: 10px; }
+  h1 .sub { font-weight: 400; color: var(--muted); font-size: 14px; }
+  h1 .lang { margin-left: auto; font-size: 13px; }
+  h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; display: flex; gap: 12px; align-items: center; }
+  .card .body { flex: 1; min-width: 0; }
+  .card .t { font-weight: 600; }
+  .card .m { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .card a.open { text-decoration: none; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--btn); color: var(--ink); border-radius: 6px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #e2ddd2; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { background: #a0471f; }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  button:disabled { opacity: .45; cursor: default; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #ece8df; color: var(--muted); margin-right: 6px; vertical-align: 1px; }
+  .badge.paper { background: #e4ecf5; color: #3d5a80; }
+  .badge.book { background: #f1e6d6; color: #8a5a2b; }
+  input[type=search] { width: 100%; font: inherit; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fff; outline: none; }
+  input[type=search]:focus { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 2px 12px; }
+  .empty { color: var(--muted); padding: 14px; text-align: center; }
+  code { font-size: 12px; background: #eee9df; padding: 1px 5px; border-radius: 4px; }
+  select { font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: var(--btn); max-width: 260px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #2a2723; color: #fff; padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; font-size: 13px; }
+  #toast.show { opacity: .92; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📚 <span data-i18n="畅读">畅读</span> <span class="sub" data-i18n="边听边读，摘录进笔记">边听边读，摘录进笔记</span><button class="small lang" id="btn-lang" title="Language / 语言">EN</button></h1>
+
+  <h2 data-i18n="从 Zotero 找论文">从 Zotero 找论文</h2>
+  <input type="search" id="q" data-i18n-placeholder="输入作者、年份、题目关键词或 citekey，比如  smith 2019 priming" placeholder="输入作者、年份、题目关键词或 citekey，比如  smith 2019 priming" autofocus>
+  <div class="hint" id="bibhint"></div>
+  <div id="zresults"></div>
+
+  <h2 data-i18n="最近在读">最近在读</h2>
+  <div id="shelf"></div>
+  <div class="hint" data-i18n-html="add-book"></div>
+  <div class="hint" style="margin-top:30px"><button class="small" id="quit" data-i18n="关闭畅读服务">关闭畅读服务</button> <span data-i18n="关掉后双击桌面上的畅读 App 可以再开。">关掉后双击桌面上的畅读 App 可以再开。</span></div>
+</div>
+<div id="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const api = async (url, opt) => { const r = await fetch(url, opt); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.statusText); return j; };
+  const toast = (m) => { const el = $("toast"); el.textContent = m; el.classList.add("show"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 2500); };
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  const EN = {
+    "畅读": "Read Smoother", "边听边读，摘录进笔记": "listen while you read; highlights go to your notes",
+    "从 Zotero 找论文": "Find a paper in Zotero",
+    "输入作者、年份、题目关键词或 citekey，比如  smith 2019 priming": "Author, year, title words or citekey, e.g.  smith 2019 priming",
+    "最近在读": "Recently read", "关闭畅读服务": "Quit Read Smoother", "关掉后双击桌面上的畅读 App 可以再开。": "Double-click the Read Smoother app to start it again.",
+    "索引来自 {file}（Better BibTeX 自动导出，Zotero 一变它就更新）": "Index from {file} (Better BibTeX auto-export; it updates whenever Zotero changes)",
+    "还没配置 Zotero：在 config.json 里把 bib_path 指向 Better BibTeX 自动导出的 .bib 文件": "Zotero is not configured: point bib_path in config.json at a Better BibTeX auto-export (.bib)",
+    "找不到 .bib 文件：{path}": ".bib file not found: {path}",
+    "还没有书。": "No books yet.", "读到 p.{page}": "at p.{page}", "还没开始": "not started", "论文": "paper", "书": "book",
+    "{n} 条摘录": "{n} highlights", "还没打开过": "never opened", "PDF 不在原位置了": "PDF moved or missing",
+    "继续读": "Continue", "开始读": "Start", "移出": "Remove", "只从书架移除，不删 PDF 和笔记": "Removes it from the shelf only; the PDF and notes are kept",
+    "从书架移除《{title}》？PDF 和笔记都不会删。": "Remove “{title}” from the shelf? The PDF and notes are kept.",
+    "没搜到。搜索是按词做子串匹配的，试试少打几个词。": "Nothing found. Each word is matched as a substring; try fewer words.",
+    "没有 PDF": "no PDF", "读这篇": "Read", "打开中…": "Opening…", "已按模板新建笔记 {file}": "Created a note from the template: {file}", "打不开：": "Could not open: ",
+    "关闭畅读的后台服务？": "Quit the Read Smoother server?", "畅读已关闭": "Read Smoother stopped", "载入失败：": "Failed to load: ",
+    "add-book": "To add a book: drop a PDF into <code>books/</code> and reload this page, or run <code>./start.sh path/to/book.pdf --title \"Title\" --author \"Author\"</code>.",
+  };
+  const ZH_HTML = { "add-book": "要加一本书：把 PDF 放进 <code>books/</code> 文件夹再刷新这页；或者终端里 <code>./start.sh 路径.pdf --title 书名 --author 作者</code>。" };
+  let LANG = localStorage.getItem("lang") || "";
+  const t = (s, vars) => { let out = (LANG === "en" && EN[s] !== undefined) ? EN[s] : s; if (vars) for (const k in vars) out = out.split("{" + k + "}").join(vars[k]); return out; };
+  function applyLang() {
+    document.documentElement.lang = LANG === "en" ? "en" : "zh";
+    document.title = LANG === "en" ? "Read Smoother · shelf" : "畅读 · 书架";
+    $("btn-lang").textContent = LANG === "en" ? "中文" : "EN";
+    document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+    document.querySelectorAll("[data-i18n-html]").forEach(el => { const k = el.dataset.i18nHtml; el.innerHTML = LANG === "en" ? EN[k] : ZH_HTML[k]; });
+    if (LAST) renderShelf(LAST);
+    search();
+  }
+  $("btn-lang").onclick = () => { LANG = LANG === "en" ? "zh" : "en"; localStorage.setItem("lang", LANG); applyLang(); };
+  const fmtTime = (iso) => { if (!iso) return t("还没打开过"); const d = new Date(iso); return d.toLocaleDateString(LANG === "en" ? "en-US" : "zh-CN", { month: "numeric", day: "numeric" }) + " " + d.toTimeString().slice(0, 5); };
+
+  let LAST = null;
+  async function loadShelf() {
+    const data = await api("/api/library");
+    if (!LANG) { LANG = data.language === "zh" ? "zh" : "en"; applyLang(); }
+    LAST = data; renderShelf(data);
+  }
+  function renderShelf(data) {
+    $("bibhint").textContent = !data.bib ? t("还没配置 Zotero：在 config.json 里把 bib_path 指向 Better BibTeX 自动导出的 .bib 文件")
+      : data.bib_ok ? t("索引来自 {file}（Better BibTeX 自动导出，Zotero 一变它就更新）", { file: data.bib.split("/").slice(-2).join("/") })
+      : t("找不到 .bib 文件：{path}", { path: data.bib });
+    const box = $("shelf"); box.innerHTML = "";
+    if (!data.items.length) { box.innerHTML = '<div class="empty"></div>'; box.firstChild.textContent = t("还没有书。"); return; }
+    data.items.forEach(it => {
+      const d = document.createElement("div"); d.className = "card";
+      const prog = it.page ? t("读到 p.{page}", { page: it.page }) : t("还没开始");
+      d.innerHTML = `<div class="body">
+          <div class="t"><span class="badge ${it.kind}">${it.kind === "paper" ? t("论文") : t("书")}</span>${esc(it.title)}</div>
+          <div class="m">${esc(it.author)}${it.citekey ? " · <code>" + esc(it.citekey) + "</code>" : ""} · ${prog} · ${t("{n} 条摘录", { n: it.n_hl })} · ${fmtTime(it.last_opened)}${it.exists ? "" : " · <b style='color:#b00'>" + t("PDF 不在原位置了") + "</b>"}</div>
+        </div>`;
+      const open = document.createElement("a"); open.className = "open"; open.href = "/read/" + it.slug;
+      const b = document.createElement("button"); b.className = "primary"; b.textContent = it.page ? t("继续读") : t("开始读"); b.disabled = !it.exists; open.appendChild(b);
+      const rm = document.createElement("button"); rm.className = "small"; rm.textContent = t("移出"); rm.title = t("只从书架移除，不删 PDF 和笔记");
+      rm.onclick = async () => { if (!confirm(t("从书架移除《{title}》？PDF 和笔记都不会删。", { title: it.title }))) return; await api("/api/b/" + it.slug + "/forget", { method: "POST", body: "{}" }); loadShelf(); };
+      d.append(open, rm); box.appendChild(d);
+    });
+  }
+
+  let timer;
+  $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+  async function search() {
+    const q = $("q").value.trim();
+    const box = $("zresults"); box.innerHTML = "";
+    if (!q) return;
+    const res = await api("/api/zotero/search?q=" + encodeURIComponent(q));
+    if (!res.length) { box.innerHTML = '<div class="empty"></div>'; box.firstChild.textContent = t("没搜到。搜索是按词做子串匹配的，试试少打几个词。"); return; }
+    res.forEach(e => {
+      const d = document.createElement("div"); d.className = "card";
+      d.innerHTML = `<div class="body">
+          <div class="t">${esc(e.title)}</div>
+          <div class="m">${esc(e.short)} (${esc(e.year)})${e.journal ? " · " + esc(e.journal) : ""} · <code>${esc(e.citekey)}</code></div>
+        </div>`;
+      if (!e.has_pdf) { const s = document.createElement("span"); s.className = "badge"; s.textContent = t("没有 PDF"); d.appendChild(s); }
+      else {
+        if (e.files.length > 1) {
+          const sel = document.createElement("select"); e.files.forEach((f, i) => { const o = document.createElement("option"); o.value = i; o.textContent = f; sel.appendChild(o); }); d.appendChild(sel); d._sel = sel;
+        }
+        const b = document.createElement("button"); b.className = "primary"; b.textContent = t("读这篇");
+        b.onclick = async () => {
+          b.disabled = true; b.textContent = t("打开中…");
+          try {
+            const r = await api("/api/zotero/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ citekey: e.citekey, file_idx: d._sel ? +d._sel.value : 0 }) });
+            if (r.created_note) toast(t("已按模板新建笔记 {file}", { file: (r.note_path || "").split("/").slice(-2).join("/") }));
+            location.href = "/read/" + r.slug;
+          } catch (err) { toast(t("打不开：") + err.message); b.disabled = false; b.textContent = t("读这篇"); }
+        };
+        d.appendChild(b);
+      }
+      box.appendChild(d);
+    });
+  }
+
+  $("quit").onclick = async () => { if (!confirm(t("关闭畅读的后台服务？"))) return; try { await api("/api/quit", { method: "POST", body: "{}" }); } catch (e) {} document.body.innerHTML = '<div class="wrap"><h1>' + esc(t("畅读已关闭")) + '</h1><div class="hint">' + esc(t("关掉后双击桌面上的畅读 App 可以再开。")) + "</div></div>"; };
+  applyLang();
+  loadShelf().catch(e => { $("shelf").innerHTML = '<div class="empty"></div>'; $("shelf").firstChild.textContent = t("载入失败：") + e.message; });
+})();
+</script>
+</body>
+</html>

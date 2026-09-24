@@ -1,0 +1,14 @@
+{
+  "language": "en",
+  "vault_path": "~/Obsidian/MyVault",
+  "vault_name": "MyVault",
+  "notes_folder": "Reading",
+  "paper_notes_folder": "Papers",
+  "book_note_template": "templates/book_note.md",
+  "paper_note_template": "templates/paper_note.md",
+  "bib_path": "~/Obsidian/MyVault/library.bib",
+  "default_voice": "en-US-AriaNeural",
+  "tts_locales": ["en"],
+  "ai_read_dirs": ["~/Obsidian/MyVault", "~/Documents"],
+  "profile_path": "profile.md"
+}
