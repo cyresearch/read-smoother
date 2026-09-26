@@ -3,10 +3,12 @@
 -- Change `proj` if you cloned the project somewhere else.
 set proj to (POSIX path of (path to home folder)) & "projects/read-smoother"
 set theURL to "http://127.0.0.1:8765/"
-set probe to "curl -s -m 1 -o /dev/null -w '%{http_code}' " & theURL & "api/library"
+-- `|| true` keeps do shell script from raising an error when the server is not running yet (curl exits 7, output "000").
+set probe to "curl -s -m 1 -o /dev/null -w '%{http_code}' " & theURL & "api/library || true"
 set code to do shell script probe
 if code is not "200" then
-	do shell script "cd " & quoted form of proj & " && nohup ./start.sh --no-browser > server.log 2>&1 &"
+	-- Redirect and close every inherited descriptor in the outer shell first; otherwise do shell script waits on its pipes forever (macOS sh forks a wrapper that keeps them).
+	do shell script "cd " & quoted form of proj & " && exec > server.log 2>&1 < /dev/null; for fd in $(seq 3 255); do eval \"exec $fd>&-\"; done; nohup ./start.sh --no-browser &"
 	repeat 20 times
 		delay 0.5
 		set code to do shell script probe
@@ -15,7 +17,8 @@ if code is not "200" then
 end if
 if code is "200" then
 	try
-		do shell script "open -na 'Google Chrome' --args --app=" & theURL
+		-- A dedicated profile (data/chrome-app) so an already-running Chrome cannot swallow the --app request.
+		do shell script "open -na 'Google Chrome' --args --user-data-dir=" & quoted form of (proj & "/data/chrome-app") & " --no-first-run --no-default-browser-check --app=" & theURL
 	on error
 		open location theURL
 	end try
