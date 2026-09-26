@@ -17,7 +17,9 @@ Screen readers and audiobook apps supply the voice, but not the rest of what rea
 ## ✨ What it does
 
 - **Reads any text PDF aloud** with Microsoft neural voices (47 English voices; other locales configurable). Speed 0.6× to 2×. The current sentence is highlighted on the page and the page turns by itself. Sentences split across two pages are read as one.
-- **Contents sidebar** from the PDF's bookmarks, or guessed from font sizes and weights when there are none (works well for journal articles). Click a heading and the voice jumps to it.
+- **Contents sidebar** from the PDF's bookmarks, or guessed from font sizes and weights when there are none (publisher cover pages are skipped). When the guess is poor, one click has the AI read the text and rebuild the contents; the result is kept for that PDF. Click a heading and the voice jumps to it.
+- **Hover a citation** such as *Costa et al. (2000)* or *(Hoshino & Kroll, 2008)* and the matching entry from the paper's own reference list pops up: title, authors, journal. One click copies it or looks it up in your Zotero library, and if the PDF is there you can open it in Read Smoother straight away.
+- **Search the whole PDF** (`F` or `⌘F`): every match is listed with its page and context, matches are marked on the page, and a click jumps there.
 - **Hover a word** for half a second and a card shows its pronunciation and definition from the macOS dictionary (Oxford, and the Chinese-English Oxford if you have it enabled). Phrases are recognised as units: hover *spite* in "in spite of" and the whole phrase is explained; hover *drop* in "drop important people in" and the phrasal verb is offered.
 - **Highlight and annotate** with one key. Each highlight becomes a quote in a Markdown note with your comment under it. The Markdown file is the single source of truth: edit the note in Obsidian and the page picks it up.
 - **Zotero**: search your library by author, year, title or citekey, open the PDF, and the highlights go to that paper's `@citekey.md` note. No Zotero API needed, only the Better BibTeX auto-export you probably already have.
@@ -115,6 +117,7 @@ Runtime flags: `--port`, `--config other.json`, `--data-dir somewhere` (progress
 | `Shift` + click | highlight from the current sentence to the clicked one |
 | `-` `=` | slower / faster |
 | `T` `D` `A` | contents, dictionary on/off, focus the AI box |
+| `F` or `⌘F` | search the whole PDF |
 | `1` to `9` | quick questions |
 
 ## 🔄 Still evolving

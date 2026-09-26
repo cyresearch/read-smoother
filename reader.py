@@ -122,6 +122,7 @@ FUNC_WORDS = {"the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "but"
 
 class Sentencizer:
     def __init__(self, doc: pymupdf.Document):
+        self._toks = {}
         self.doc = doc
         self._raw = {}
         self._cache = {}
@@ -193,7 +194,9 @@ class Sentencizer:
         sentences = self._split(tokens)
         sentences = self._mark_skips(sentences, pg.rect)
         words = []
+        self._toks[n] = {}
         for sent in sentences:
+            self._toks[n][sent["id"]] = [(t["off"], t["text"], t["rects"]) for t in sent["_toks"]]
             for t in sent.pop("_toks"):
                 if re.search(r"[A-Za-z]", t["text"]):
                     for r in t["rects"]:
@@ -319,12 +322,27 @@ class Sentencizer:
         return out
 
 
+COVER_MARKERS = ("additional services and information for", "the online version of this article", "downloaded from",
+                 "contents lists available at", "author's personal copy", "this content downloaded", "terms and conditions of use",
+                 "please scroll down for article", "to link to this article", "how to cite this article")
+JUNK_LINE = re.compile(r"(doi:|https?://|www\.|@|©|\bemail\b|e-mail|published by|version of record|corresponding author|"
+                       r"all rights reserved|reprints and permission|^[–\-•·]\s|^\d{1,2}\s+[A-Z][a-z]+\s+\d{4}$)", re.I)
+
+
+def is_cover_page(text):
+    """出版社加的封面/下载页（SAGE、Elsevier、JSTOR……）：标题之外全是链接和说明，猜目录时整页跳过。"""
+    t = text.lower()
+    return sum(m in t for m in COVER_MARKERS) >= 2 or ("downloaded from" in t and len(t.split()) < 120)
+
+
 def heuristic_toc(doc, max_pages=400):
     """PDF 没有书签时，按字号 / 字体（粗体、异体）从版面里猜标题（论文常用）。"""
     from collections import Counter
     lines = []
     weight = Counter()
     for pno in range(min(doc.page_count, max_pages)):
+        if pno < 3 and is_cover_page(doc[pno].get_text()):
+            continue
         for b in doc[pno].get_text("dict")["blocks"]:
             ls = b.get("lines", [])
             for li, ln in enumerate(ls):
@@ -355,6 +373,8 @@ def heuristic_toc(doc, max_pages=400):
             return False
         if re.match(r"^(figure|fig\.|table|note[s]?\b)\s*\d*", t, re.I):
             return False
+        if t.endswith(":") or JUNK_LINE.search(t):
+            return False
         if L["size"] < body_size - 1.5:
             return False
         if L["size"] >= body_size + 1.0:
@@ -373,18 +393,197 @@ def heuristic_toc(doc, max_pages=400):
         else:
             merged.append(dict(c))
     freq = Counter(m["text"] for m in merged)
-    merged = [m for m in merged if freq[m["text"]] < 3 and len(m["text"].split()) <= 22]
-    if not merged:
-        return []
+    merged = [m for m in merged if freq[m["text"]] < 3 and len(m["text"].split()) <= 22
+              and not re.search(r"\(continued\)\s*$", m["text"], re.I)]
     # 级别：先按字号，再按 粗体 > 其他字体 > 斜体
     def rank(m):
         return (-m["size"], 0 if m["bold"] else (2 if m["italic"] else 1))
+    # 同一页上同一样式冒出 5 条以上，多半是表格的列名 / 单元格，不是标题
+    per_page = Counter((m["page"], rank(m)) for m in merged)
+    merged = [m for m in merged if per_page[(m["page"], rank(m))] < 5]
+    if not merged:
+        return []
     ranks = sorted({rank(m) for m in merged})
     while len(merged) > 160 and len(ranks) > 1:
         drop = ranks.pop()
         merged = [m for m in merged if rank(m) != drop]
     level_of = {r: min(i + 1, 3) for i, r in enumerate(ranks)}
     return [{"level": level_of[rank(m)], "title": m["text"], "page": m["page"], "auto": True} for m in merged]
+
+
+REF_HEADING = re.compile(r"^\s*(references?|reference list|bibliography|works cited|literature cited|参考文献|引用文献|文献)\s*$", re.I)
+YEAR_RE = re.compile(r"\b((?:1[6-9]|20)\d{2})([a-z])?\b")
+NAME_PARTICLES = {"van", "von", "de", "der", "den", "del", "della", "di", "da", "du", "la", "le", "ten", "ter", "te", "el", "al", "bin", "ibn", "mac", "mc", "st", "o"}
+
+
+def _fold(w):
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", w) if not unicodedata.combining(c)).lower().replace("’", "'")
+
+
+def _ref_lines(doc, start_page):
+    """Layout lines of the reference pages: page, x0, y0, size, text (headers and footers dropped)."""
+    out = []
+    for pno in range(start_page, doc.page_count):
+        pg = doc[pno]
+        H = pg.rect.height
+        for b in pg.get_text("dict")["blocks"]:
+            for ln in b.get("lines", []):
+                spans = [sp for sp in ln.get("spans", []) if sp["text"].strip()]
+                if not spans:
+                    continue
+                y0 = ln["bbox"][1]
+                if y0 < H * 0.08 or y0 > H * 0.93:
+                    continue
+                text = re.sub(r"\s+", " ", " ".join(sp["text"] for sp in spans)).strip()
+                bold = all(re.search(r"bold|-bd|black|heavy", sp["font"], re.I) for sp in spans)
+                out.append(dict(page=pno + 1, x0=ln["bbox"][0], y0=y0, size=round(max(sp["size"] for sp in spans), 1), text=text, bold=bold))
+    return out
+
+
+def find_references(doc, toc):
+    """Page index (0-based) where the reference list starts, or None."""
+    for t in toc:
+        if REF_HEADING.match(t["title"]):
+            return t["page"] - 1
+    pages = [pno for pno in range(doc.page_count) if any(REF_HEADING.match(l) for l in doc[pno].get_text().splitlines())]
+    if not pages:
+        return None
+    start = pages[-1]          # the last run of consecutive pages (a running header repeats on every page of the list)
+    while start - 1 in pages:
+        start -= 1
+    return start
+
+
+def parse_ref_entry(text):
+    """Split one reference into authors / year / title / rest (APA-style, best effort)."""
+    m = (re.search(r"\((\d{4}[a-z]?|n\.d\.|in press)(?:,\s*[^)]{1,24})?\)[.,:]?", text)   # (2000) / (2000, November) / (n.d.)
+         or re.search(r"(?<=[.,])\s(\d{4}[a-z]?)[.,:]\s", text))
+    if not m:
+        return None
+    year = m.group(1)
+    authors = text[:m.start()].strip().rstrip(",").strip()
+    rest = text[m.end():].strip()
+    tm = re.match(r"(.+?[^A-Z]\.|.+?[?!])\s+(.*)$", rest)
+    title, source = (tm.group(1).strip(), tm.group(2).strip()) if tm else (rest, "")
+    surnames = [_fold(w) for w in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", authors)
+                if len(w) > 1 and w.lower() not in ("and", "eds", "ed", "et", "al")]
+    first = [_fold(w) for w in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", authors.split(",")[0])]
+    first = [w for w in first if len(w) > 1] or surnames[:1]
+    return {"authors": authors, "year": year, "title": title, "source": source, "text": text,
+            "_first": first[-1] if first else "", "_names": set(surnames)}
+
+
+def parse_references(doc, toc):
+    """Reference list entries, found by the hanging indent of each entry (falls back to splitting on author patterns)."""
+    start = find_references(doc, toc)
+    if start is None:
+        return start, None, []
+    lines = _ref_lines(doc, start)
+    idx = next((i for i, L in enumerate(lines) if L["page"] == start + 1 and REF_HEADING.match(L["text"])), None)
+    heading_y = lines[idx]["y0"] if idx is not None else 0
+    if idx is not None:   # drop what sits above the heading (blocks are not always in top-down order)
+        lines = [L for L in lines if L["page"] > start + 1 or L["y0"] > heading_y]
+    if not lines:
+        return start, heading_y, []
+    from collections import Counter
+    body = Counter(round(L["size"]) for L in lines).most_common(1)[0][0]
+    kept = []
+    for L in lines:
+        if re.fullmatch(r"(\d+\s+)?(references?|bibliography|works cited)(\s+\d+)?", L["text"], re.I):
+            continue   # running header of the reference pages
+        heading = (L["size"] >= body + 0.9 or L["bold"]) and len(L["text"]) < 80 and not YEAR_RE.search(L["text"])
+        if kept and (heading or re.match(r"^(appendix|appendices|author biograph|supplement|notes?)\b", L["text"], re.I)):
+            break   # next section (Appendix, Author biographies…)
+        if abs(L["size"] - body) <= 1.2:
+            kept.append(L)
+    # columns: cluster x0; the smallest x0 of a column is where entries start, deeper x0 is the hanging indent
+    starts = []
+    for pno in sorted({L["page"] for L in kept}):
+        pl = [L for L in kept if L["page"] == pno]
+        xs = sorted(set(round(L["x0"]) for L in pl))
+        cols = [[xs[0]]] if xs else []
+        for x in xs[1:]:
+            if x - cols[-1][-1] < 60:
+                cols[-1].append(x)
+            else:
+                cols.append([x])
+        col_min = {}
+        for c in cols:
+            cnt = Counter(round(L["x0"]) for L in pl if round(L["x0"]) in c)
+            base = min((x for x in c if cnt[x] >= 2), default=c[0])
+            for x in c:
+                col_min[x] = base
+        pl.sort(key=lambda L: (col_min[round(L["x0"])], L["y0"]))
+        for L in pl:
+            L["start"] = round(L["x0"]) <= col_min[round(L["x0"])] + 2.5
+            starts.append(L)
+    entries, cur = [], ""
+    for L in starts:
+        if L["start"] and cur:
+            entries.append(cur)
+            cur = ""
+        if cur.endswith("-") and L["text"][:1].islower():
+            cur = cur[:-1] + L["text"]
+        else:
+            cur = (cur + " " + L["text"]).strip()
+    if cur:
+        entries.append(cur)
+    parsed = [e for e in (parse_ref_entry(t) for t in entries) if e]
+    n_start = sum(1 for L in starts if L["start"])
+    if n_start < 3 or n_start >= 0.9 * len(starts):   # no usable hanging indent: split the flat text on "Surname, I." starts
+        flat = " ".join(L["text"] for L in kept)
+        parts = re.split(r"(?<=[.)])\s+(?=[A-Z][A-Za-zÀ-ÿ'’\-]+,\s(?:[A-Z]\.|[A-Z][a-z]+\s[A-Z]\.))", flat)
+        parsed = [e for e in (parse_ref_entry(t) for t in parts) if e]
+    for i, e in enumerate(parsed):
+        e["id"] = i
+    return start, heading_y, parsed
+
+
+def find_citations(text, refs_by_year):
+    """In-text citations in one sentence -> [(start, end, [ref ids])], matched on first-author surname + year."""
+    found = {}
+    for m in YEAR_RE.finditer(text):
+        year, letter = m.group(1), m.group(2) or ""
+        cands = refs_by_year.get(year + letter) or refs_by_year.get(year) or []
+        if not cands:
+            continue
+        pre = text[:m.start()]
+        narrative = pre.rstrip().endswith("(")
+        if narrative:
+            pre = pre.rstrip()[:-1]
+        cut = max(pre.rfind(";"), pre.rfind("("), pre.rfind(")"))
+        seg_start = cut + 1
+        seg = pre[seg_start:]
+        if len(seg) > 90:
+            seg_start += len(seg) - 90
+            seg = seg[-90:]
+        toks = [(mm.start() + seg_start, _fold(mm.group(0))) for mm in re.finditer(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", seg)]
+        hits = []
+        for e in cands:
+            pos = [p for p, w in toks if w == e["_first"]]
+            if not pos and e["_names"]:
+                pos = [p for p, w in toks if w in e["_names"] and len(w) > 2]
+            if pos:
+                hits.append((pos[-1], e["id"]))
+        if not hits:
+            continue
+        first_pos = min(p for p, _ in hits)
+        hits = [i for p, i in hits if p == first_pos] or [i for _, i in hits]   # the first author is the leftmost name
+        # pull leading name particles ("van", "de") into the span
+        while True:
+            pm = re.search(r"(\S+)\s+$", text[:first_pos])
+            if pm and _fold(pm.group(1)) in NAME_PARTICLES:
+                first_pos = pm.start(1)
+            else:
+                break
+        key = next((k for k in found if k[0] == first_pos or (k[0] <= first_pos < k[1])), None)
+        if key:
+            st, en, ids = key[0], max(key[1], m.end()), found.pop(key)
+            found[(st, en)] = ids + [i for i in hits if i not in ids]
+        else:
+            found[(first_pos, m.end())] = hits
+    return [(k[0], k[1], v) for k, v in sorted(found.items())]
 
 
 def build_toc(doc):
@@ -730,10 +929,98 @@ class Book:
         self.zotero = zotero
         self.doc = pymupdf.open(str(self.pdf_path))
         self.sent = Sentencizer(self.doc)
+        self.toc_path = DATA / f"{slug}.toc.json"     # AI-built table of contents, if the user asked for one
         self.toc = build_toc(self.doc)
+        if self.toc_path.exists():
+            try:
+                self.toc = json.loads(self.toc_path.read_text(encoding="utf-8"))
+            except ValueError:
+                pass
         self.notes = NoteStore(cfg, self)
         self.notes_chat = ChatStore(self)
         self.progress_path = DATA / f"{slug}.progress.json"
+
+    @property
+    def refs(self):
+        if not hasattr(self, "_refs"):
+            try:
+                self._ref_page, self._ref_y, self._refs = parse_references(self.doc, self.toc)
+            except Exception:  # noqa
+                import traceback
+                traceback.print_exc()
+                self._ref_page, self._ref_y, self._refs = None, None, []
+            self._refs_by_year = {}
+            for e in self._refs:
+                self._refs_by_year.setdefault(e["year"], []).append(e)
+                if e["year"][-1:].isalpha():
+                    self._refs_by_year.setdefault(e["year"][:-1], []).append(e)
+        return self._refs
+
+    def ref_public(self, e):
+        return {k: e[k] for k in ("id", "authors", "year", "title", "source", "text")}
+
+    def cites(self, n):
+        """Citations on page n (0-based): rects + the matching reference entries."""
+        if not self.refs or (self._ref_page is not None and n > self._ref_page):
+            return []
+        raw = self.sent._raw_page(n)
+        out = []
+        for sent in raw["sentences"]:
+            if n == self._ref_page and sent["rects"] and sent["rects"][0][1] >= (self._ref_y or 0):
+                continue   # the reference list itself
+            toks = self.sent._toks.get(n, {}).get(sent["id"], [])
+            for st, en, ids in find_citations(sent["text"], self._refs_by_year):
+                lines = {}
+                for off, txt, rects in toks:
+                    if off < en and off + len(txt) > st:   # token overlaps the citation (handles a leading "(")
+                        for r in rects:
+                            key = round(r[1])
+                            if key in lines:
+                                q = lines[key]
+                                lines[key] = [min(q[0], r[0]), min(q[1], r[1]), max(q[2], r[2]), max(q[3], r[3])]
+                            else:
+                                lines[key] = list(r[:4])
+                if lines:
+                    out.append({"sid": sent["id"], "label": sent["text"][st:en], "refs": ids,
+                                "rects": [[round(v, 2) for v in r] for r in lines.values()]})
+        return out
+
+    def set_toc(self, toc):
+        """Replace the table of contents (AI-built) or, with None, go back to bookmarks / the font guess."""
+        if hasattr(self, "_refs"):
+            del self._refs
+        if toc is None:
+            self.toc_path.unlink(missing_ok=True)
+            self.toc = build_toc(self.doc)
+        else:
+            self.toc = toc
+            self.toc_path.write_text(json.dumps(toc, ensure_ascii=False, indent=1), encoding="utf-8")
+        tocf = DATA / "books" / self.slug / "toc.txt"
+        if tocf.parent.exists():
+            tocf.write_text("\n".join("  " * (t["level"] - 1) + f"{t['title']}  (p.{t['page']})" for t in self.toc)
+                            or note_text(self.cfg, "no_toc"), encoding="utf-8")
+
+    def search(self, q, limit=300):
+        """Case-insensitive full-text search over every page's sentences (headers/footers included)."""
+        q = re.sub(r"\s+", " ", q).strip()
+        if not q:
+            return {"hits": [], "total": 0, "pages": 0}
+        pat = re.compile(re.escape(q).replace(r"\ ", r"\s+"), re.I)
+        hits, total, pages = [], 0, set()
+        for n in range(self.doc.page_count):
+            for sent in self.sent._raw_page(n)["sentences"]:
+                ms = list(pat.finditer(sent["text"]))
+                if not ms:
+                    continue
+                total += len(ms); pages.add(n + 1)
+                if len(hits) < limit:
+                    a = max(0, ms[0].start() - 70)
+                    snippet = sent["text"][a:ms[0].end() + 90]
+                    hits.append({"page": n + 1, "sid": sent["id"], "n": len(ms),
+                                 "before": ("…" if a else "") + snippet[:ms[0].start() - a],
+                                 "match": ms[0].group(0),
+                                 "after": snippet[ms[0].end() - a:] + ("…" if ms[0].end() + 90 < len(sent["text"]) else "")})
+        return {"hits": hits, "total": total, "pages": len(pages), "truncated": total > len(hits)}
 
     def zotero_page_link(self, page):
         if self.kind == "paper" and self.att_key:
@@ -1101,6 +1388,41 @@ def _clean_env():
     return env
 
 
+def ai_toc(book, model="haiku"):
+    """Ask Claude to build the table of contents from the book's own text (papers without bookmarks)."""
+    book_dir = export_book_text(book)
+    full = (book_dir / "full.txt").read_text(encoding="utf-8")
+    if len(full) > 400_000:   # a long book: give the font guess instead of the whole text
+        cands = "\n".join(f"p.{t['page']}: {t['title']}" for t in heuristic_toc(book.doc))
+        material = "[Candidate heading lines guessed from fonts; keep the real headings, drop the rest]\n" + cands
+    else:
+        material = "[Full text; each page starts with '=== p.N ===']\n" + full
+    prompt = (
+        f"Build the table of contents of this document. Title: \"{book.title}\"; author(s): {book.author}.\n"
+        "Output ONLY lines of the form  LEVEL<TAB>PAGE<TAB>TITLE  (LEVEL 1-3, PAGE = the '=== p.N ===' page where the heading "
+        "appears). Include section and subsection headings in reading order (e.g. Abstract, Introduction, Method, Participants, "
+        "Results, Discussion, References, Appendix; for a book: parts, chapters, sections). Skip the document title, author names, "
+        "affiliations, journal/publisher boilerplate, running headers, figure and table captions. Copy heading text exactly. "
+        "If a heading has a number keep it. No other text.\n\n" + material)
+    cmd = [CLAUDE_BIN, "-p", "--model", model, "--tools", "", "--permission-mode", "dontAsk",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--output-format", "json"]
+    proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, env=_clean_env(), cwd=str(DATA), timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "").strip()[-400:] or f"claude exited with code {proc.returncode}")
+    try:
+        out = json.loads(proc.stdout).get("result", "")
+    except ValueError:
+        out = proc.stdout
+    toc = []
+    for line in out.splitlines():
+        m = re.match(r"^\s*([123])\s*[\t|]\s*(?:p\.?\s*)?(\d+)\s*[\t|]\s*(.+?)\s*$", line)
+        if m and 0 < int(m.group(2)) <= book.doc.page_count:
+            toc.append({"level": int(m.group(1)), "title": m.group(3), "page": int(m.group(2)), "ai": True})
+    if not toc:
+        raise RuntimeError("no headings in the answer: " + out.strip()[:200])
+    return toc
+
+
 def ask_stream(book, question, model, page, sid, include_page, include_sentence, new_session):
     """生成器：逐段产出回答文字；最后一段是 JSON 元信息。"""
     chat = book.notes_chat
@@ -1334,6 +1656,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(book.info())
                 if sub == "toc":
                     return self._json(book.toc)
+                if sub == "search":
+                    return self._json(book.search(q.get("q", [""])[0]))
                 if sub == "notes":
                     return self._json(book.notes.list())
                 if sub == "chat":
@@ -1345,7 +1669,16 @@ class Handler(BaseHTTPRequestHandler):
                     n = int(pm.group(1)) - 1
                     if not 0 <= n < book.doc.page_count:
                         return self._json({"error": "page out of range"}, 404)
-                    return self._json(book.sent.page(n))
+                    d = dict(book.sent.page(n))
+                    try:
+                        d["cites"] = book.cites(n)
+                    except Exception:  # noqa
+                        import traceback
+                        traceback.print_exc()
+                        d["cites"] = []
+                    return self._json(d)
+                if sub == "refs":
+                    return self._json([book.ref_public(e) for e in book.refs])
             return self._send(404, b"not found", "text/plain")
         except KeyError as e:
             return self._send(404, f"Not found: {e}".encode(), "text/plain; charset=utf-8")
@@ -1397,6 +1730,14 @@ class Handler(BaseHTTPRequestHandler):
                 if sub == "chat/reset":
                     book.notes_chat.reset()
                     return self._json({"ok": True})
+                if sub == "toc/ai":
+                    if not (CLAUDE_BIN and os.path.exists(CLAUDE_BIN)):
+                        return self._json({"error": "claude CLI not found"}, 500)
+                    book.set_toc(ai_toc(book, body.get("model") or "haiku"))
+                    return self._json(book.toc)
+                if sub == "toc/reset":
+                    book.set_toc(None)
+                    return self._json(book.toc)
                 if sub == "ask":
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
