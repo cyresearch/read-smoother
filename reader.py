@@ -191,8 +191,13 @@ class Sentencizer:
         for t in tokens:
             t["size0"] = sizes.get((t["rects"][0][4], t["rects"][0][5]), 0)
             t["size1"] = sizes.get((t["rects"][-1][4], t["rects"][-1][5]), 0)
-        sentences = self._split(tokens)
-        sentences = self._mark_skips(sentences, pg.rect)
+        sentences = self._split(tokens, pg.rect.height)
+        from collections import Counter
+        weight = Counter()
+        for t in tokens:
+            weight[round(t["size0"])] += len(t["text"])
+        body_size = weight.most_common(1)[0][0] if weight else 0
+        sentences = self._mark_skips(sentences, pg.rect, body_size)
         words = []
         self._toks[n] = {}
         for sent in sentences:
@@ -239,7 +244,7 @@ class Sentencizer:
             i += 1
         return toks
 
-    def _split(self, toks):
+    def _split(self, toks, page_height=0):
         sentences = []
         cur = []
 
@@ -248,13 +253,19 @@ class Sentencizer:
                 sentences.append(self._make_sentence(cur))
                 cur.clear()
 
+        def zone(t):   # 0 body, 1 running header, 2 footer / download stamp: never joined into a body sentence
+            if not page_height:
+                return 0
+            r = t["rects"][0]
+            return 1 if r[3] < page_height * 0.10 else (2 if r[1] > page_height * 0.88 else 0)
+
         for idx, t in enumerate(toks):
             cur.append(t)
             nxt = toks[idx + 1] if idx + 1 < len(toks) else None
             if nxt is None:
                 flush()
                 continue
-            if self._is_boundary(t["text"], nxt["text"]):
+            if self._is_boundary(t["text"], nxt["text"]) or zone(t) != zone(nxt):
                 flush()
                 continue
             if abs(t["size1"] - nxt["size0"]) > 0.6:
@@ -301,23 +312,31 @@ class Sentencizer:
                     lines[key] = [x0, y0, x1, y1]
         rects = [[round(v, 2) for v in r] for r in lines.values()]
         toks_out = [{"text": parts[i], "off": offs[i], "rects": [r[:4] for r in t["rects"]]} for i, t in enumerate(toks)]
-        return {"text": text, "rects": rects, "_toks": toks_out}
+        sizes = sorted(t["size0"] for t in toks if t.get("size0"))
+        return {"text": text, "rects": rects, "_toks": toks_out, "size": sizes[len(sizes) // 2] if sizes else 0}
 
     @staticmethod
-    def _mark_skips(sentences, rect):
-        """页眉页脚、纯数字等不朗读。"""
+    def _mark_skips(sentences, rect, body_size=0):
+        """Running headers, footers, download stamps and footnotes are shown but not read (and not joined into sentences)."""
         out = []
+        H = rect.height
         for i, s in enumerate(sentences):
             skip = False
             txt = s["text"]
+            top = min(r[1] for r in s["rects"]) if s["rects"] else 0
+            bottom = max(r[3] for r in s["rects"]) if s["rects"] else 0
+            near_top, near_bottom = bottom < H * 0.10, top > H * 0.88
+            small = bool(body_size) and s.get("size", 0) <= body_size - 1.5
             if not re.search(r"[A-Za-z]", txt):
                 skip = True
-            elif len(s["rects"]) == 1:
-                y = s["rects"][0][1]
-                near_edge = y < rect.height * 0.09 or y > rect.height * 0.92
+            elif near_top or near_bottom:
                 looks_header = re.match(r"^\d{1,4}\s+\S", txt) or re.search(r"\s\d{1,4}$", txt)
-                if near_edge and looks_header and len(txt.split()) <= 12:
+                if small or STAMP_RE.search(txt) or (len(s["rects"]) <= 2 and looks_header and len(txt.split()) <= 12):
                     skip = True
+            elif body_size and s.get("size", 0) <= body_size - 2 and (top > H * 0.75 or (top > H * 0.5 and re.match(r"^(\d{1,2}|[*†‡§¶])\s*\S", txt))):
+                skip = True   # footnotes: clearly smaller type at the foot of the page, or numbered small text lower down
+            elif STAMP_RE.search(txt) and len(txt) < 400 and (top > H * 0.75 or bottom < H * 0.2):
+                skip = True   # publisher stamps that sit a little further in
             out.append({"id": i, "text": txt, "rects": s["rects"], "skip": skip, "_toks": s["_toks"]})
         return out
 
@@ -333,6 +352,11 @@ def is_cover_page(text):
     """出版社加的封面/下载页（SAGE、Elsevier、JSTOR……）：标题之外全是链接和说明，猜目录时整页跳过。"""
     t = text.lower()
     return sum(m in t for m in COVER_MARKERS) >= 2 or ("downloaded from" in t and len(t.split()) < 120)
+
+
+STAMP_RE = re.compile(r"(downloaded (from|by)|this content downloaded|terms of use|use subject to|https?://|www\.|doi\.org|\bdoi:|©|"
+                      r"all rights reserved|brought to you by|authenticated|download date|ip address|jstor|cambridge core|"
+                      r"provided by|licen[cs]ed to|copyright)", re.I)
 
 
 def heuristic_toc(doc, max_pages=400):
@@ -421,10 +445,10 @@ def _fold(w):
     return "".join(c for c in unicodedata.normalize("NFKD", w) if not unicodedata.combining(c)).lower().replace("’", "'")
 
 
-def _ref_lines(doc, start_page):
+def _ref_lines(doc, start_page, end_page=None):
     """Layout lines of the reference pages: page, x0, y0, size, text (headers and footers dropped)."""
     out = []
-    for pno in range(start_page, doc.page_count):
+    for pno in range(start_page, min(doc.page_count, end_page if end_page is not None else start_page + 60)):
         pg = doc[pno]
         H = pg.rect.height
         for b in pg.get_text("dict")["blocks"]:
@@ -441,23 +465,19 @@ def _ref_lines(doc, start_page):
     return out
 
 
-def find_references(doc, toc):
-    """Page index (0-based) where the reference list starts, or None."""
-    for t in toc:
-        if REF_HEADING.match(t["title"]):
-            return t["page"] - 1
+def find_reference_starts(doc, toc):
+    """0-based pages where a reference list starts: one for a paper, one per chapter in an edited volume."""
+    starts = sorted({t["page"] - 1 for t in toc if REF_HEADING.match(t["title"])})
+    if starts:
+        return starts
     pages = [pno for pno in range(doc.page_count) if any(REF_HEADING.match(l) for l in doc[pno].get_text().splitlines())]
-    if not pages:
-        return None
-    start = pages[-1]          # the last run of consecutive pages (a running header repeats on every page of the list)
-    while start - 1 in pages:
-        start -= 1
-    return start
+    starts = [pno for pno in pages if pno - 1 not in pages]   # first page of each run (a running header repeats on every page)
+    return starts
 
 
 def parse_ref_entry(text):
     """Split one reference into authors / year / title / rest (APA-style, best effort)."""
-    m = (re.search(r"\((\d{4}[a-z]?|n\.d\.|in press)(?:,\s*[^)]{1,24})?\)[.,:]?", text)   # (2000) / (2000, November) / (n.d.)
+    m = (re.search(r"\(\s*(\d{4}[a-z]?|n\.d\.|in press)\s*\.?\s*(?:,\s*[^)]{1,24})?\)[.,:]?", text)   # (2000) / (2000, November) / ( 2016. )
          or re.search(r"(?<=[.,])\s(\d{4}[a-z]?)[.,:]\s", text))
     if not m:
         return None
@@ -475,24 +495,36 @@ def parse_ref_entry(text):
 
 
 def parse_references(doc, toc):
-    """Reference list entries, found by the hanging indent of each entry (falls back to splitting on author patterns)."""
-    start = find_references(doc, toc)
-    if start is None:
-        return start, None, []
-    lines = _ref_lines(doc, start)
+    """All reference lists in the document: ([(start_page, heading_y, last_page)], entries with global ids)."""
+    zones, entries = [], []
+    starts = find_reference_starts(doc, toc)
+    for start, nxt in zip(starts, starts[1:] + [None]):
+        heading_y, last_page, parsed = parse_reference_list(doc, start, nxt)
+        if parsed:
+            zones.append((start, heading_y, last_page))
+            entries.extend(parsed)
+    for i, e in enumerate(entries):
+        e["id"] = i
+    return zones, entries
+
+
+def parse_reference_list(doc, start, end=None):
+    """One reference list from page `start`: entries found by the hanging indent (falls back to splitting on author patterns)."""
+    lines = _ref_lines(doc, start, end)
     idx = next((i for i, L in enumerate(lines) if L["page"] == start + 1 and REF_HEADING.match(L["text"])), None)
     heading_y = lines[idx]["y0"] if idx is not None else 0
     if idx is not None:   # drop what sits above the heading (blocks are not always in top-down order)
         lines = [L for L in lines if L["page"] > start + 1 or L["y0"] > heading_y]
     if not lines:
-        return start, heading_y, []
+        return heading_y, start, []
     from collections import Counter
-    body = Counter(round(L["size"]) for L in lines).most_common(1)[0][0]
+    body = Counter(round(L["size"]) for L in lines[:40]).most_common(1)[0][0]   # the list's own font size, not the next chapter's
     kept = []
     for L in lines:
         if re.fullmatch(r"(\d+\s+)?(references?|bibliography|works cited)(\s+\d+)?", L["text"], re.I):
             continue   # running header of the reference pages
-        heading = (L["size"] >= body + 0.9 or L["bold"]) and len(L["text"]) < 80 and not YEAR_RE.search(L["text"])
+        heading = ((L["size"] >= body + 0.9 or L["bold"]) and 6 <= len(L["text"]) < 80 and not YEAR_RE.search(L["text"])
+                   and not re.match(r"(doi|url|https?:|www\.)", L["text"], re.I))
         if kept and (heading or re.match(r"^(appendix|appendices|author biograph|supplement|notes?)\b", L["text"], re.I)):
             break   # next section (Appendix, Author biographies…)
         if abs(L["size"] - body) <= 1.2:
@@ -535,9 +567,8 @@ def parse_references(doc, toc):
         flat = " ".join(L["text"] for L in kept)
         parts = re.split(r"(?<=[.)])\s+(?=[A-Z][A-Za-zÀ-ÿ'’\-]+,\s(?:[A-Z]\.|[A-Z][a-z]+\s[A-Z]\.))", flat)
         parsed = [e for e in (parse_ref_entry(t) for t in parts) if e]
-    for i, e in enumerate(parsed):
-        e["id"] = i
-    return start, heading_y, parsed
+    last_page = max(L["page"] for L in kept) - 1 if kept else start
+    return heading_y, last_page, parsed
 
 
 def find_citations(text, refs_by_year):
@@ -742,6 +773,14 @@ class BibIndex:
 # ----------------------------------------------------------------------------
 
 MARK_RE = re.compile(r"^%% hl:([A-Za-z0-9]+) %%\s*$", re.M)
+# highlight colours, written to the note as Obsidian callout types so they show in the vault too
+HL_COLORS = ["orange", "yellow", "green", "blue", "purple", "red"]
+CALLOUT_OF = {"orange": "quote", "yellow": "question", "green": "success", "blue": "info", "purple": "example", "red": "danger"}
+COLOR_OF = {v: k for k, v in CALLOUT_OF.items()}
+COLOR_OF.update({"cite": "orange", "warning": "orange", "caution": "orange", "attention": "orange", "help": "yellow", "faq": "yellow",
+                 "check": "green", "done": "green", "tip": "green", "hint": "green", "important": "green",
+                 "note": "blue", "todo": "blue", "abstract": "blue", "summary": "blue", "tldr": "blue",
+                 "error": "red", "failure": "red", "fail": "red", "missing": "red", "bug": "red"})
 BEGIN = "%% read-smoother:begin %%"
 END = "%% read-smoother:end %%"
 BEGIN_RE = re.compile(r"%% (?:read-smoother|reading-companion|bandu|pdf-tts-reader):begin %%")
@@ -819,12 +858,13 @@ class NoteStore:
         for i in range(1, len(parts), 2):
             hid, body = parts[i], parts[i + 1]
             quote_lines, note_lines = [], []
-            page = None
+            page, color = None, "orange"
             in_quote = False
             for line in body.split("\n"):
-                m = re.match(r"^> \[!quote\]\s*p\.(\d+)", line)
+                m = re.match(r"^> \[!([a-z]+)\][+-]?\s*p\.(\d+)", line, re.I)
                 if m:
-                    page = int(m.group(1))
+                    page = int(m.group(2))
+                    color = COLOR_OF.get(m.group(1).lower(), "orange")
                     in_quote = True
                     continue
                 if in_quote and line.startswith(">"):
@@ -833,7 +873,7 @@ class NoteStore:
                 in_quote = False
                 note_lines.append(line)
             entries.append({"id": hid, "page": page, "quote": " ".join(quote_lines).strip(),
-                            "note": "\n".join(note_lines).strip()})
+                            "note": "\n".join(note_lines).strip(), "color": color})
         return head, entries, tail
 
     def _render(self, head, entries, tail):
@@ -841,7 +881,8 @@ class NoteStore:
         for e in entries:
             link = self.book.zotero_page_link(e["page"])
             title = f"p.{e['page']}" + (f" [🆉]({link})" if link else "")
-            block = f"%% hl:{e['id']} %%\n> [!quote] {title}\n> {e['quote'].replace(chr(10), ' ')}\n"
+            callout = CALLOUT_OF.get(e.get("color") or "orange", "quote")
+            block = f"%% hl:{e['id']} %%\n> [!{callout}] {title}\n> {e['quote'].replace(chr(10), ' ')}\n"
             if e["note"]:
                 block += "\n" + e["note"].rstrip() + "\n"
             chunks.append(block + "\n")
@@ -865,11 +906,11 @@ class NoteStore:
             out.sort(key=lambda x: ((x["page"] or 0), (x["sids"] or [0])[0]))
             return out
 
-    def add(self, page, quote, rects, sids, note=""):
+    def add(self, page, quote, rects, sids, note="", color="orange"):
         with self.lock:
             head, entries, tail = self._parse()
             hid = hashlib.sha1(f"{page}{quote}{dt.datetime.now().isoformat()}".encode()).hexdigest()[:8]
-            entry = {"id": hid, "page": page, "quote": quote, "note": note}
+            entry = {"id": hid, "page": page, "quote": quote, "note": note, "color": color if color in HL_COLORS else "orange"}
             pos = len(entries)
             for i, e in enumerate(entries):
                 g = self.geo.get(e["id"], {})
@@ -883,7 +924,7 @@ class NoteStore:
             self._save_geo()
             return {**entry, "rects": rects, "sids": sids}
 
-    def update(self, hid, note=None, quote=None):
+    def update(self, hid, note=None, quote=None, color=None):
         with self.lock:
             head, entries, tail = self._parse()
             for e in entries:
@@ -892,6 +933,8 @@ class NoteStore:
                         e["note"] = note.strip()
                     if quote is not None:
                         e["quote"] = quote.strip()
+                    if color in HL_COLORS:
+                        e["color"] = color
                     self._write(head, entries, tail)
                     return e
             return None
@@ -944,11 +987,11 @@ class Book:
     def refs(self):
         if not hasattr(self, "_refs"):
             try:
-                self._ref_page, self._ref_y, self._refs = parse_references(self.doc, self.toc)
+                self._ref_zones, self._refs = parse_references(self.doc, self.toc)
             except Exception:  # noqa
                 import traceback
                 traceback.print_exc()
-                self._ref_page, self._ref_y, self._refs = None, None, []
+                self._ref_zones, self._refs = [], []
             self._refs_by_year = {}
             for e in self._refs:
                 self._refs_by_year.setdefault(e["year"], []).append(e)
@@ -961,12 +1004,12 @@ class Book:
 
     def cites(self, n):
         """Citations on page n (0-based): rects + the matching reference entries."""
-        if not self.refs or (self._ref_page is not None and n > self._ref_page):
+        if not self.refs or any(start < n <= last for start, _, last in self._ref_zones):
             return []
         raw = self.sent._raw_page(n)
         out = []
         for sent in raw["sentences"]:
-            if n == self._ref_page and sent["rects"] and sent["rects"][0][1] >= (self._ref_y or 0):
+            if any(n == start and sent["rects"] and sent["rects"][0][1] >= y for start, y, _ in self._ref_zones):
                 continue   # the reference list itself
             toks = self.sent._toks.get(n, {}).get(sent["id"], [])
             for st, en, ids in find_citations(sent["text"], self._refs_by_year):
@@ -1037,6 +1080,62 @@ class Book:
             "default_voice": self.cfg["default_voice"], "progress": prog,
             "language": self.cfg.get("language", "en"), "dict_ok": _DS is not None,
         }
+
+
+EBOOK_EXT = (".epub", ".mobi", ".fb2")
+
+
+def convert_ebook(src: Path) -> Path:
+    """Lay out an EPUB / MOBI / FB2 as an A4 PDF next to it (PyMuPDF does the rendering), keeping its contents and metadata."""
+    out = src.with_suffix(".pdf")
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    pymupdf.TOOLS.mupdf_display_errors(False)     # e-book CSS quirks are reported loudly and harmlessly
+    try:
+        doc = pymupdf.open(str(src))
+        if doc.is_reflowable:
+            doc.layout(width=595, height=842, fontsize=12)
+        pdf = pymupdf.open("pdf", doc.convert_to_pdf())
+        toc = doc.get_toc()
+        if toc:
+            pdf.set_toc(toc)
+        meta = doc.metadata or {}
+        pdf.set_metadata({"title": meta.get("title") or "", "author": meta.get("author") or ""})
+        part = out.with_name(out.name + ".part")
+        pdf.save(str(part), garbage=3, deflate=True)
+        part.replace(out)     # only a finished file ever carries the .pdf name
+    finally:
+        pymupdf.TOOLS.mupdf_display_errors(True)
+    return out
+
+
+_convert_lock = threading.Lock()
+_converting: dict = {}     # src -> Thread
+_convert_errors: dict = {}  # src -> message
+
+
+def ebook_pdf(src: Path):
+    """The converted PDF for an e-book, or None while it is still being made (conversion runs once, in the background)."""
+    out = src.with_suffix(".pdf")
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    with _convert_lock:
+        th = _converting.get(src)
+        if th and th.is_alive():
+            return None
+        if src in _convert_errors:
+            return None
+
+        def job():
+            try:
+                convert_ebook(src)
+            except Exception as e:  # noqa
+                _convert_errors[src] = str(e)
+                print(f"could not convert {src.name}: {e}", file=sys.stderr)
+        th = threading.Thread(target=job, daemon=True)
+        _converting[src] = th
+        th.start()
+    return None
 
 
 class Library:
@@ -1120,6 +1219,11 @@ class Library:
             return b
 
     def shelf(self):
+        pending = []
+        for src in sorted(BOOKS.iterdir()):
+            if src.suffix.lower() in EBOOK_EXT and ebook_pdf(src) is None:
+                pending.append({"slug": None, "kind": "book", "title": src.stem, "author": "", "converting": True,
+                                "error": _convert_errors.get(src), "exists": True, "page": None, "last_opened": None, "n_hl": 0})
         for pdf in sorted(BOOKS.glob("*.pdf")):
             if self.slug_for_pdf(pdf) not in self.registry:
                 self.register_pdf(pdf)
@@ -1133,7 +1237,7 @@ class Library:
                           "citekey": r.get("citekey"), "exists": Path(r["pdf"]).exists(),
                           "page": prog.get("page"), "last_opened": r.get("last_opened"), "n_hl": n_hl})
         items.sort(key=lambda x: x["last_opened"] or "", reverse=True)
-        return items
+        return pending + items
 
     def forget(self, slug):
         with self.lock:
@@ -1423,7 +1527,7 @@ def ai_toc(book, model="haiku"):
     return toc
 
 
-def ask_stream(book, question, model, page, sid, include_page, include_sentence, new_session):
+def ask_stream(book, question, model, page, sid, include_page, include_sentence, new_session, web=False):
     """生成器：逐段产出回答文字；最后一段是 JSON 元信息。"""
     chat = book.notes_chat
     if new_session:
@@ -1455,6 +1559,9 @@ def ask_stream(book, question, model, page, sid, include_page, include_sentence,
         f"The user's notes live in {notes_root}. The note file for this book is {book.notes.md_path}; "
         "it holds their highlights and comments, so read it when they ask what they noted before.\n"
         "Never read back or repeat anything that looks like a password, API key or token."
+        + ("\n\n[Web] WebSearch and WebFetch are available. Use them only when the question needs information that is not in the book "
+           "or the user's files: a cited paper, a term, a person, recent work, a URL they paste. Say what you searched and cite the pages you used. "
+           "Do not put the user's personal details into search queries." if web else "")
         + (f"\n\n[About the user, written by them]\n{profile}" if profile else "")
     )
     ctx_parts = []
@@ -1482,8 +1589,9 @@ def ask_stream(book, question, model, page, sid, include_page, include_sentence,
     prompt = question.strip()
     if ctx_parts:
         prompt = "\n\n".join(ctx_parts) + "\n\n[Question]\n" + prompt
-    cmd = [CLAUDE_BIN, "-p", prompt, "--model", model, "--tools", "Read,Grep,Glob",
-           "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk",
+    tools = "Read,Grep,Glob" + (",WebSearch,WebFetch" if web else "")
+    cmd = [CLAUDE_BIN, "-p", prompt, "--model", model, "--tools", tools,
+           "--allowedTools", tools, "--permission-mode", "dontAsk",
            "--add-dir", str(book_dir), *[str(d) for d in dirs],
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
            "--system-prompt", system,
@@ -1592,7 +1700,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, obj, status=200):
-        self._send(status, json.dumps(obj, ensure_ascii=False).encode())
+        try:
+            self._send(status, json.dumps(obj, ensure_ascii=False).encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the client gave up waiting; nothing to do
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -1720,7 +1831,7 @@ class Handler(BaseHTTPRequestHandler):
                 sub = m.group(2)
                 if sub == "notes":
                     return self._json(book.notes.add(int(body["page"]), body["quote"], body.get("rects", []),
-                                                     body.get("sids", []), body.get("note", "")))
+                                                     body.get("sids", []), body.get("note", ""), body.get("color", "orange")))
                 if sub == "progress":
                     book.progress_path.write_text(json.dumps(body))
                     return self._json({"ok": True})
@@ -1747,7 +1858,7 @@ class Handler(BaseHTTPRequestHandler):
                     for chunk in ask_stream(book, body.get("question", ""), body.get("model", "sonnet"),
                                             int(body.get("page") or 0), body.get("sid"),
                                             bool(body.get("include_page", True)), bool(body.get("include_sentence", True)),
-                                            bool(body.get("new_session", False))):
+                                            bool(body.get("new_session", False)), bool(body.get("web", False))):
                         try:
                             self.wfile.write(chunk.encode("utf-8"))
                             self.wfile.flush()
@@ -1768,7 +1879,7 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self._send(404, b"not found", "text/plain")
         body = self._body()
-        e = self.lib.get(m.group(1)).notes.update(m.group(2), note=body.get("note"), quote=body.get("quote"))
+        e = self.lib.get(m.group(1)).notes.update(m.group(2), note=body.get("note"), quote=body.get("quote"), color=body.get("color"))
         return self._json(e or {"error": "not found"}, 200 if e else 404)
 
     def do_DELETE(self):
@@ -1802,6 +1913,8 @@ def main():
         pdf = Path(a.pdf).expanduser().resolve()
         if not pdf.exists():
             sys.exit(f"PDF not found: {pdf}")
+        if pdf.suffix.lower() in EBOOK_EXT:
+            pdf = convert_ebook(pdf)
         slug = lib.register_pdf(pdf, a.title, a.author)
         url += f"read/{slug}"
     Handler.lib = lib

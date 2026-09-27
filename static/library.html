@@ -75,9 +75,10 @@
     "没搜到。搜索是按词做子串匹配的，试试少打几个词。": "Nothing found. Each word is matched as a substring; try fewer words.",
     "没有 PDF": "no PDF", "读这篇": "Read", "打开中…": "Opening…", "已按模板新建笔记 {file}": "Created a note from the template: {file}", "打不开：": "Could not open: ",
     "关闭畅读的后台服务？": "Quit the Read Smoother server?", "畅读已关闭": "Read Smoother stopped", "载入失败：": "Failed to load: ",
-    "add-book": "To add a book: drop a PDF into <code>books/</code> and reload this page, or run <code>./start.sh path/to/book.pdf --title \"Title\" --author \"Author\"</code>.",
+    "正在转成 PDF…（EPUB 排版要一会儿，好了会自动出现）": "Converting to PDF… (laying out an EPUB takes a moment; it appears here when done)", "转换失败：": "Conversion failed: ",
+    "add-book": "To add a book: drop a PDF (or EPUB / MOBI / FB2, converted to PDF on the spot) into <code>books/</code> and reload this page, or run <code>./start.sh path/to/book.pdf --title \"Title\" --author \"Author\"</code>.",
   };
-  const ZH_HTML = { "add-book": "要加一本书：把 PDF 放进 <code>books/</code> 文件夹再刷新这页；或者终端里 <code>./start.sh 路径.pdf --title 书名 --author 作者</code>。" };
+  const ZH_HTML = { "add-book": "要加一本书：把 PDF（或 EPUB / MOBI / FB2，会自动转成 PDF）放进 <code>books/</code> 文件夹再刷新这页；或者终端里 <code>./start.sh 路径.pdf --title 书名 --author 作者</code>。" };
   let LANG = localStorage.getItem("lang") || "";
   const t = (s, vars) => { let out = (LANG === "en" && EN[s] !== undefined) ? EN[s] : s; if (vars) for (const k in vars) out = out.split("{" + k + "}").join(vars[k]); return out; };
   function applyLang() {
@@ -105,8 +106,15 @@
       : t("找不到 .bib 文件：{path}", { path: data.bib });
     const box = $("shelf"); box.innerHTML = "";
     if (!data.items.length) { box.innerHTML = '<div class="empty"></div>'; box.firstChild.textContent = t("还没有书。"); return; }
+    let converting = false;
     data.items.forEach(it => {
       const d = document.createElement("div"); d.className = "card";
+      if (it.converting) {
+        converting = converting || !it.error;
+        d.innerHTML = `<div class="body"><div class="t"><span class="badge book">${t("书")}</span>${esc(it.title)}</div><div class="m"></div></div>`;
+        d.querySelector(".m").textContent = it.error ? t("转换失败：") + it.error : t("正在转成 PDF…（EPUB 排版要一会儿，好了会自动出现）");
+        box.appendChild(d); return;
+      }
       const prog = it.page ? t("读到 p.{page}", { page: it.page }) : t("还没开始");
       d.innerHTML = `<div class="body">
           <div class="t"><span class="badge ${it.kind}">${it.kind === "paper" ? t("论文") : t("书")}</span>${esc(it.title)}</div>
@@ -118,6 +126,8 @@
       rm.onclick = async () => { if (!confirm(t("从书架移除《{title}》？PDF 和笔记都不会删。", { title: it.title }))) return; await api("/api/b/" + it.slug + "/forget", { method: "POST", body: "{}" }); loadShelf(); };
       d.append(open, rm); box.appendChild(d);
     });
+    clearTimeout(renderShelf._t);
+    if (converting) renderShelf._t = setTimeout(() => loadShelf().catch(() => {}), 3000);
   }
 
   let timer;
