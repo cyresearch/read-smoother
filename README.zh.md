@@ -68,7 +68,9 @@ cp profile.example.md profile.md       # 可选：告诉 AI 你是谁
 ./start.sh demo/The-Elements-of-Style.pdf --title "The Elements of Style" --author "William Strunk Jr."
 ```
 
-加自己的书：把 PDF 放进 `books/`（会出现在书架上），或者 `./start.sh 路径.pdf --title "书名" --author "作者"`。
+加自己的书：把 PDF 放进 `books/`（会出现在书架上；EPUB、MOBI、FB2 会当场排成 A4 PDF，保留目录和元数据），或者 `./start.sh 路径.pdf --title "书名" --author "作者"`。
+
+想听自己正在写的东西：把 Markdown 文件放进 `books/`，最好是放一个链接（`ln -s ~/paper/intro.md books/`）。它会排成 PDF，标题变成目录，图片留在原处；每次保存草稿都会重新排版，所以重新打开或刷新页面读到的总是最新版。之前版本上做的高亮，在前文改动后位置可能会偏。
 
 想要一个双击就开、带 Chrome 窗口、不用开终端的 App：
 

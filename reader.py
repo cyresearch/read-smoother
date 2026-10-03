@@ -18,13 +18,16 @@ import argparse
 import asyncio
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
 import sys
 import threading
+import unicodedata
 import urllib.parse
 import webbrowser
+from html import escape as html_escape, unescape as html_unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -120,12 +123,35 @@ FUNC_WORDS = {"the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "but"
               "its", "his", "her", "our", "your", "into", "about", "between", "when", "if", "because", "while"}
 
 
+LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st"})     # so TTS, search and the dictionary see plain letters
+
+# Journal PDFs typeset around 2000 (old Cambridge fonts) store fi as ®, fl as ¯, the en dash as ± and accents as a
+# capital after the letter (SaÂnchez, LemhoÈfer, acceÁs, RoÃle, GarcãÂa). Fixed only where the ® = fi signature shows up.
+LEGACY_SIGNATURE = re.compile(r"[a-z]®[a-z]|(?<![A-Za-z])®[a-z]{2}")
+LEGACY_ACCENTS = {"Â": "́", "Á": "̀", "È": "̈", "Ã": "̂"}
+
+
+def has_legacy_encoding(doc):
+    if not hasattr(doc, "_legacy_enc"):
+        text = "".join(doc[n].get_text() for n in range(min(doc.page_count, 6)))
+        doc._legacy_enc = len(LEGACY_SIGNATURE.findall(text)) >= 3
+    return doc._legacy_enc
+
+
+def fix_legacy(s):
+    s = re.sub(r"®(?=[a-z]|[-\u00ad]$)", "fi", s)
+    s = re.sub(r"¯(?=[a-z]|[-\u00ad]$)", "fl", s)
+    s = re.sub(r"ã(?=[ÂÁÈÃ])", "i", s).replace("±", "–")
+    return re.sub(r"([A-Za-z])([ÂÁÈÃ])", lambda m: unicodedata.normalize("NFC", m.group(1) + LEGACY_ACCENTS[m.group(2)]), s)
+
+
 class Sentencizer:
     def __init__(self, doc: pymupdf.Document):
         self._toks = {}
         self.doc = doc
         self._raw = {}
         self._cache = {}
+        self.legacy = has_legacy_encoding(doc)
 
     # -- 跨页拼句 --------------------------------------------------------------
     @staticmethod
@@ -185,19 +211,22 @@ class Sentencizer:
         if n in self._raw:
             return self._raw[n]
         pg = self.doc[n]
-        words = pg.get_text("words")  # x0,y0,x1,y1,word,block,line,wordno
+        words = [(*w[:4], w[4].translate(LIGATURES), *w[5:]) for w in pg.get_text("words")]  # x0,y0,x1,y1,word,block,line,wordno
+        if self.legacy:
+            words = [(*w[:4], fix_legacy(w[4]), *w[5:]) for w in words]
         sizes = self._line_sizes(pg)
         tokens = self._merge_hyphens(words)
         for t in tokens:
             t["size0"] = sizes.get((t["rects"][0][4], t["rects"][0][5]), 0)
             t["size1"] = sizes.get((t["rects"][-1][4], t["rects"][-1][5]), 0)
-        sentences = self._split(tokens, pg.rect.height)
+        edges = self._edge_zones(tokens, pg.rect.height)
+        sentences = self._split(tokens, pg.rect.height, edges)
         from collections import Counter
         weight = Counter()
         for t in tokens:
             weight[round(t["size0"])] += len(t["text"])
         body_size = weight.most_common(1)[0][0] if weight else 0
-        sentences = self._mark_skips(sentences, pg.rect, body_size)
+        sentences = self._mark_skips(sentences, pg.rect, body_size, edges)
         words = []
         self._toks[n] = {}
         for sent in sentences:
@@ -214,7 +243,8 @@ class Sentencizer:
     def _line_sizes(pg):
         """(block, line) -> 该行最大字号，用来识别标题。"""
         sizes = {}
-        for b in pg.get_text("dict")["blocks"]:
+        # same flags as get_text("words"): with image blocks left in, every block number after an image is off by one
+        for b in pg.get_text("dict", flags=pymupdf.TEXTFLAGS_WORDS)["blocks"]:
             for li, line in enumerate(b.get("lines", [])):
                 mx = max((sp["size"] for sp in line.get("spans", []) if sp["text"].strip()), default=0)
                 sizes[(b["number"], li)] = round(mx, 1)
@@ -231,8 +261,8 @@ class Sentencizer:
             text = w
             while (text.endswith("­") or (text.endswith("-") and len(text) > 1)) and i + 1 < len(words):
                 nxt = words[i + 1]
-                same_block_next_line = nxt[5] == b and nxt[6] != l
-                if not (same_block_next_line and nxt[4][:1].islower()):
+                next_line = nxt[5] != b or nxt[6] != l    # the rest of the word sits on the next line, block or column
+                if not (next_line and nxt[4][:1].islower()):
                     break
                 text = text.rstrip("­-") + nxt[4]
                 rects.append((nxt[0], nxt[1], nxt[2], nxt[3], nxt[5], nxt[6]))
@@ -244,9 +274,37 @@ class Sentencizer:
             i += 1
         return toks
 
-    def _split(self, toks, page_height=0):
+    @staticmethod
+    def _edge_zones(tokens, H):
+        """(header_y, footer_y): the running header / footer lines, found as text at the very top or bottom
+        that is separated from the body by a blank gap of about two lines. Either may be None."""
+        ys = []
+        for y in sorted(round(t["rects"][0][1]) for t in tokens):
+            if not ys or y - ys[-1] > 3:      # lines of two columns rarely align exactly: cluster within 3 pt
+                ys.append(y)
+        if len(ys) < 4:
+            return None, None
+        gaps = sorted(b - a for a, b in zip(ys, ys[1:]))
+        line_h = gaps[len(gaps) // 2] or 12
+        header = footer = None
+        for k in range(min(3, len(ys) - 1)):
+            if ys[k] > H * 0.12:
+                break
+            if ys[k + 1] - ys[k] > 1.8 * line_h:
+                header = ys[k]
+                break
+        for k in range(len(ys) - 1, max(len(ys) - 4, 0), -1):
+            if ys[k] < H * 0.85:
+                break
+            if ys[k] - ys[k - 1] > 1.8 * line_h:
+                footer = ys[k]
+                break
+        return header, footer
+
+    def _split(self, toks, page_height=0, edges=(None, None)):
         sentences = []
         cur = []
+        header, footer = edges
 
         def flush():
             if cur:
@@ -254,10 +312,12 @@ class Sentencizer:
                 cur.clear()
 
         def zone(t):   # 0 body, 1 running header, 2 footer / download stamp: never joined into a body sentence
-            if not page_height:
-                return 0
-            r = t["rects"][0]
-            return 1 if r[3] < page_height * 0.10 else (2 if r[1] > page_height * 0.88 else 0)
+            y = t["rects"][0][1]
+            if header is not None and y <= header + 1:
+                return 1
+            if footer is not None and y >= footer - 1:
+                return 2
+            return 0
 
         for idx, t in enumerate(toks):
             cur.append(t)
@@ -268,13 +328,15 @@ class Sentencizer:
             if self._is_boundary(t["text"], nxt["text"]) or zone(t) != zone(nxt):
                 flush()
                 continue
-            if abs(t["size1"] - nxt["size0"]) > 0.6:
+            nf = nxt["text"].lstrip("(\"'“‘[")[:1]
+            if abs(t["size1"] - nxt["size0"]) > 0.6 and (nf.isupper() or nf.isdigit() or abs(t["size1"] - nxt["size0"]) > 3):
                 flush()
                 continue
             if nxt["block"] != t["block"]:
                 # 块边界：段落以标点结尾，或当前块很短（标题），就断句
                 blk_len = sum(1 for x in cur if x["block"] == t["block"])
-                if t["text"].rstrip(CLOSERS)[-1:] in END_PUNCT + ":;" or blk_len < 12:
+                nxt_first = nxt["text"].lstrip("(\"'“‘[")[:1]
+                if t["text"].rstrip(CLOSERS)[-1:] in END_PUNCT + ":;" or (blk_len < 12 and (nxt_first.isupper() or nxt_first.isdigit())):
                     flush()
         return sentences
 
@@ -316,16 +378,18 @@ class Sentencizer:
         return {"text": text, "rects": rects, "_toks": toks_out, "size": sizes[len(sizes) // 2] if sizes else 0}
 
     @staticmethod
-    def _mark_skips(sentences, rect, body_size=0):
+    def _mark_skips(sentences, rect, body_size=0, edges=(None, None)):
         """Running headers, footers, download stamps and footnotes are shown but not read (and not joined into sentences)."""
         out = []
         H = rect.height
+        header, footer = edges
         for i, s in enumerate(sentences):
             skip = False
             txt = s["text"]
             top = min(r[1] for r in s["rects"]) if s["rects"] else 0
             bottom = max(r[3] for r in s["rects"]) if s["rects"] else 0
-            near_top, near_bottom = bottom < H * 0.10, top > H * 0.88
+            near_top = (header is not None and top <= header + 1) or bottom < H * 0.07
+            near_bottom = (footer is not None and top >= footer - 1) or top > H * 0.93
             small = bool(body_size) and s.get("size", 0) <= body_size - 1.5
             if not re.search(r"[A-Za-z]", txt):
                 skip = True
@@ -375,6 +439,8 @@ def heuristic_toc(doc, max_pages=400):
                     continue
                 text = re.sub(r"\s+", " ", " ".join(sp["text"].strip() for sp in spans)).strip()
                 text = re.sub(r"&[a-z0-9]+;", " ", text).strip()
+                if has_legacy_encoding(doc):
+                    text = fix_legacy(text)
                 size = round(max(sp["size"] for sp in spans), 1)
                 fonts = {sp["font"] for sp in spans}
                 bold = all(("bold" in f.lower() or "-bd" in f.lower() or "black" in f.lower()) for f in fonts)
@@ -437,6 +503,7 @@ def heuristic_toc(doc, max_pages=400):
 
 REF_HEADING = re.compile(r"^\s*(references?|reference list|bibliography|works cited|literature cited|参考文献|引用文献|文献)\s*$", re.I)
 YEAR_RE = re.compile(r"\b((?:1[6-9]|20)\d{2})([a-z])?\b")
+UNDATED_RE = re.compile(r"\b(in press|submitted|in preparation|forthcoming)\b", re.I)   # "Lemhöfer and Dijkstra (submitted)"
 NAME_PARTICLES = {"van", "von", "de", "der", "den", "del", "della", "di", "da", "du", "la", "le", "ten", "ter", "te", "el", "al", "bin", "ibn", "mac", "mc", "st", "o"}
 
 
@@ -451,37 +518,49 @@ def _ref_lines(doc, start_page, end_page=None):
     for pno in range(start_page, min(doc.page_count, end_page if end_page is not None else start_page + 60)):
         pg = doc[pno]
         H = pg.rect.height
+        header, _ = Sentencizer._edge_zones([{"rects": [w[:4]]} for w in pg.get_text("words")], H)
+        top = header + 1 if header is not None else H * 0.08   # a fixed 8% would also cut a column's first line on tight pages
         for b in pg.get_text("dict")["blocks"]:
             for ln in b.get("lines", []):
                 spans = [sp for sp in ln.get("spans", []) if sp["text"].strip()]
                 if not spans:
                     continue
                 y0 = ln["bbox"][1]
-                if y0 < H * 0.08 or y0 > H * 0.93:
+                if y0 < top or y0 > H * 0.93:
                     continue
                 text = re.sub(r"\s+", " ", " ".join(sp["text"] for sp in spans)).strip()
+                if has_legacy_encoding(doc):
+                    text = fix_legacy(text)
                 bold = all(re.search(r"bold|-bd|black|heavy", sp["font"], re.I) for sp in spans)
-                out.append(dict(page=pno + 1, x0=ln["bbox"][0], y0=y0, size=round(max(sp["size"] for sp in spans), 1), text=text, bold=bold))
+                size = round(max(sp["size"] for sp in spans), 1)
+                prev = out[-1] if out else None
+                if (prev and prev["page"] == pno + 1 and prev["block"] == b["number"] and abs(prev["y0"] - y0) < 1.5
+                        and -1 < ln["bbox"][0] - prev["x1"] < 15):
+                    # a justified line that the PDF stores word by word: glue it back, or the words' x positions
+                    # fill the gap between the columns and both columns get read as one
+                    prev.update(text=prev["text"] + " " + text, x1=ln["bbox"][2], size=max(prev["size"], size), bold=prev["bold"] and bold)
+                    continue
+                out.append(dict(page=pno + 1, block=b["number"], x0=ln["bbox"][0], x1=ln["bbox"][2], y0=y0, size=size, text=text, bold=bold))
     return out
 
 
 def find_reference_starts(doc, toc):
     """0-based pages where a reference list starts: one for a paper, one per chapter in an edited volume."""
-    starts = sorted({t["page"] - 1 for t in toc if REF_HEADING.match(t["title"])})
-    if starts:
-        return starts
     pages = [pno for pno in range(doc.page_count) if any(REF_HEADING.match(l) for l in doc[pno].get_text().splitlines())]
-    starts = [pno for pno in pages if pno - 1 not in pages]   # first page of each run (a running header repeats on every page)
-    return starts
+    printed = [pno for pno in pages if pno - 1 not in pages]   # first page of each run (a running header repeats on every page)
+    # the contents can leave lists out (an AI-built one often covers only the main text) or be a page off: use both,
+    # and where they are a page apart trust the page the heading is printed on
+    from_toc = {t["page"] - 1 for t in toc if REF_HEADING.match(t["title"])}
+    return sorted({t for t in from_toc if not any(abs(p - t) <= 1 for p in printed)} | set(printed))
 
 
 def parse_ref_entry(text):
     """Split one reference into authors / year / title / rest (APA-style, best effort)."""
-    m = (re.search(r"\(\s*(\d{4}[a-z]?|n\.d\.|in press)\s*\.?\s*(?:,\s*[^)]{1,24})?\)[.,:]?", text)   # (2000) / (2000, November) / ( 2016. )
+    m = (re.search(r"\(\s*(\d{4}(?:[a-z]|\([a-z]\))?|n\.d\.|(?i:in press|submitted|in preparation|forthcoming))\s*\.?\s*(?:,\s*[^)]{1,24})?\)[.,:]?", text)   # (2000) / (2000, November) / ( 2016. ) / (2000(b))
          or re.search(r"(?<=[.,])\s(\d{4}[a-z]?)[.,:]\s", text))
     if not m:
         return None
-    year = m.group(1)
+    year = re.sub(r"[()]", "", m.group(1)).lower()
     authors = text[:m.start()].strip().rstrip(",").strip()
     rest = text[m.end():].strip()
     tm = re.match(r"(.+?[^A-Z]\.|.+?[?!])\s+(.*)$", rest)
@@ -490,8 +569,11 @@ def parse_ref_entry(text):
                 if len(w) > 1 and w.lower() not in ("and", "eds", "ed", "et", "al")]
     first = [_fold(w) for w in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", authors.split(",")[0])]
     first = [w for w in first if len(w) > 1] or surnames[:1]
+    org = None   # corporate author ("R Core Team", "Institute of Language Teaching and Research"): cited by the whole name
+    if "," not in authors and not re.search(r"\b[A-Z]\.", authors) and 1 < len(authors.split()) <= 8:
+        org = re.sub(r"[^\w\s'’\-]", " ", authors).split()
     return {"authors": authors, "year": year, "title": title, "source": source, "text": text,
-            "_first": first[-1] if first else "", "_names": set(surnames)}
+            "_first": first[-1] if first else "", "_names": set(surnames), "_org": org}
 
 
 def parse_references(doc, toc):
@@ -501,6 +583,8 @@ def parse_references(doc, toc):
     for start, nxt in zip(starts, starts[1:] + [None]):
         heading_y, last_page, parsed = parse_reference_list(doc, start, nxt)
         if parsed:
+            for e in parsed:
+                e["zone"] = len(zones)
             zones.append((start, heading_y, last_page))
             entries.extend(parsed)
     for i, e in enumerate(entries):
@@ -513,8 +597,19 @@ def parse_reference_list(doc, start, end=None):
     lines = _ref_lines(doc, start, end)
     idx = next((i for i, L in enumerate(lines) if L["page"] == start + 1 and REF_HEADING.match(L["text"])), None)
     heading_y = lines[idx]["y0"] if idx is not None else 0
-    if idx is not None:   # drop what sits above the heading (blocks are not always in top-down order)
-        lines = [L for L in lines if L["page"] > start + 1 or L["y0"] > heading_y]
+    if idx is not None:   # drop what comes before the heading (blocks are not always in top-down order)
+        W, hx = doc[start].rect.width, lines[idx]["x0"]
+        left = [L for L in lines if L["page"] == start + 1 and L["x0"] < W * 0.45]
+        # heading at the top of the right column (not just centred on a one-column page): the left column is still the paper's text
+        right_col = hx > W * 0.45 and left and sum(L["x1"] < W * 0.55 for L in left) >= 0.8 * len(left)
+
+        def after_heading(L):
+            if L["page"] > start + 1:
+                return True
+            if right_col:
+                return L["x0"] > W * 0.45 and L["y0"] > heading_y
+            return L["y0"] > heading_y
+        lines = [L for L in lines if after_heading(L)]
     if not lines:
         return heading_y, start, []
     from collections import Counter
@@ -524,6 +619,7 @@ def parse_reference_list(doc, start, end=None):
         if re.fullmatch(r"(\d+\s+)?(references?|bibliography|works cited)(\s+\d+)?", L["text"], re.I):
             continue   # running header of the reference pages
         heading = ((L["size"] >= body + 0.9 or L["bold"]) and 6 <= len(L["text"]) < 80 and not YEAR_RE.search(L["text"])
+                   and L["text"][:1].isupper() and not L["text"].endswith((".", ",", ";", ":"))   # footnotes end in a period
                    and not re.match(r"(doi|url|https?:|www\.)", L["text"], re.I))
         if kept and (heading or re.match(r"^(appendix|appendices|author biograph|supplement|notes?)\b", L["text"], re.I)):
             break   # next section (Appendix, Author biographies…)
@@ -574,12 +670,13 @@ def parse_reference_list(doc, start, end=None):
 def find_citations(text, refs_by_year):
     """In-text citations in one sentence -> [(start, end, [ref ids])], matched on first-author surname + year."""
     found = {}
-    for m in YEAR_RE.finditer(text):
-        year, letter = m.group(1), m.group(2) or ""
-        cands = refs_by_year.get(year + letter) or refs_by_year.get(year) or []
+    marks = [(m.start(), m.end(), m.group(1) + (m.group(2) or ""), m.group(1)) for m in YEAR_RE.finditer(text)]
+    marks += [(m.start(), m.end(), m.group(1).lower(), m.group(1).lower()) for m in UNDATED_RE.finditer(text)]
+    for m_start, m_end, ykey, year in sorted(marks):
+        cands = refs_by_year.get(ykey) or refs_by_year.get(year) or []
         if not cands:
             continue
-        pre = text[:m.start()]
+        pre = text[:m_start]
         narrative = pre.rstrip().endswith("(")
         if narrative:
             pre = pre.rstrip()[:-1]
@@ -590,30 +687,57 @@ def find_citations(text, refs_by_year):
             seg_start += len(seg) - 90
             seg = seg[-90:]
         toks = [(mm.start() + seg_start, _fold(mm.group(0))) for mm in re.finditer(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", seg)]
-        hits = []
+        hits = []   # (position, ref id, matched on the first author)
         for e in cands:
+            if e.get("_org"):
+                om = re.search(r"\b" + r"\s+".join(re.escape(w) for w in e["_org"]) + r"\b", seg, re.I)
+                if om:
+                    hits.append((om.start() + seg_start, e["id"], True))
+                continue
             pos = [p for p, w in toks if w == e["_first"]]
-            if not pos and e["_names"]:
-                pos = [p for p, w in toks if w in e["_names"] and len(w) > 2]
+            primary = bool(pos)
+            if not pos and e["_names"]:   # a co-author's name; "van" / "de" alone say nothing
+                pos = [p for p, w in toks if w in e["_names"] and len(w) > 2 and w not in NAME_PARTICLES]
             if pos:
-                hits.append((pos[-1], e["id"]))
+                hits.append((pos[-1], e["id"], primary))
         if not hits:
             continue
-        first_pos = min(p for p, _ in hits)
-        hits = [i for p, i in hits if p == first_pos] or [i for _, i in hits]   # the first author is the leftmost name
+        if any(h[2] for h in hits):   # "(Dijkstra, in press)" is Dijkstra's paper, not Van Hell & Dijkstra's
+            hits = [h for h in hits if h[2]]
+        first_pos = min(p for p, _, _ in hits)
+        hits = [i for p, i, _ in hits if p == first_pos] or [i for _, i, _ in hits]   # the first author is the leftmost name
+        if len(hits) > 1:   # one first author, several papers that year: keep the one whose author list fits the citation
+            by_id = {e["id"]: e for e in cands}
+            cited = {_fold(w) for w in re.findall(r"[A-ZÀ-Þ][A-Za-zÀ-ÿ'’\-]+", text[first_pos:m_start])} - NAME_PARTICLES
+            et_al = "et al" in text[first_pos:m_start]
+            im = re.match(r"\S+,?\s+([A-Z])\.", text[first_pos:m_start])   # "Chen, Q. et al., 2017" vs Chen, L.
+
+            def fit(i):
+                e = by_id[i]
+                if im:
+                    em = re.match(r"[^,]+,\s*\*?([A-Z])", e["authors"])
+                    if em and em.group(1) != im.group(1):
+                        return -99
+                names = e["_names"] - NAME_PARTICLES
+                n_authors = len(re.findall(r"[.)]\s*(?:,\s*&?|&)\s*(?=[A-Z])", e["authors"])) + 1   # "Dijkstra, A. (Ton) & Van Heuven, W. J. B." / "Brysbaert, M., & Van Wijnendaele, I." -> 2
+                return (len(cited & names) - len(cited - names) + (0.5 if e["year"] == ykey else 0)
+                        - (2 if et_al and n_authors < 3 else 0)
+                        - (0 if et_al else 0.25 * max(0, n_authors - len(cited))))   # "Dijkstra (1998)": the single-author paper
+            best = max(fit(i) for i in hits)
+            hits = [i for i in hits if fit(i) == best]
         # pull leading name particles ("van", "de") into the span
         while True:
-            pm = re.search(r"(\S+)\s+$", text[:first_pos])
+            pm = re.search(r"[(\[]?(\S+)\s+$", text[:first_pos])   # "(von Studnitz": the particle, not the bracket
             if pm and _fold(pm.group(1)) in NAME_PARTICLES:
                 first_pos = pm.start(1)
             else:
                 break
         key = next((k for k in found if k[0] == first_pos or (k[0] <= first_pos < k[1])), None)
         if key:
-            st, en, ids = key[0], max(key[1], m.end()), found.pop(key)
+            st, en, ids = key[0], max(key[1], m_end), found.pop(key)
             found[(st, en)] = ids + [i for i in hits if i not in ids]
         else:
-            found[(first_pos, m.end())] = hits
+            found[(first_pos, m_end)] = hits
     return [(k[0], k[1], v) for k, v in sorted(found.items())]
 
 
@@ -959,6 +1083,38 @@ class NoteStore:
 # 书 / 论文 对象，以及书架
 # ----------------------------------------------------------------------------
 
+def is_scanned(doc):
+    """Mostly image-only pages with no usable text layer (old journal scans)."""
+    pages = range(min(doc.page_count, 30))
+    blank = sum(1 for n in pages if doc[n].get_images() and len(doc[n].get_text("words")) < 20)
+    return blank >= max(1, len(pages) // 2)
+
+
+def text_quality(path, pages=4):
+    """Share of letters in the text layer of the first pages, None when there is hardly any text (a scan).
+    A PDF re-saved through Safari's print dialog can keep the glyphs but lose the character map, so its
+    text reads like '567 89:5 ;7<9;7=' (about 0.25); real papers, CJK ones included, score 0.7 or more."""
+    with pymupdf.open(path) as d:
+        chars = "".join(w[4] for n in range(min(pages, d.page_count)) for w in d[n].get_text("words"))
+    if len(chars) < 200:
+        return None
+    return sum(c.isalpha() for c in chars) / len(chars)
+
+
+def pick_attachment(files):
+    """First PDF with a readable text layer; failing that a scan (OCR will read it) before a garbled one."""
+    scores = []
+    for f in files:
+        try:
+            q = text_quality(f)
+        except Exception:  # noqa
+            q = 0
+        if q is not None and q >= 0.5:
+            return f
+        scores.append(q)
+    return next((f for f, q in zip(files, scores) if q is None), files[0])
+
+
 class Book:
     def __init__(self, cfg, slug, pdf_path, title, author, kind="book", citekey=None, att_key=None, zotero=None):
         self.cfg = cfg
@@ -970,7 +1126,15 @@ class Book:
         self.citekey = citekey
         self.att_key = att_key
         self.zotero = zotero
-        self.doc = pymupdf.open(str(self.pdf_path))
+        self.ocr_path = DATA / "ocr" / f"{slug}.pdf"     # the same PDF with a text layer added by ocrmypdf
+        self.ocr_state, self.ocr_error = None, None
+        if self.ocr_path.exists() and self.ocr_path.stat().st_mtime >= self.pdf_path.stat().st_mtime:
+            self.doc = pymupdf.open(str(self.ocr_path))
+            self.ocr_state = "done"
+        else:
+            self.doc = pymupdf.open(str(self.pdf_path))
+            if is_scanned(self.doc):
+                self._start_ocr()
         self.sent = Sentencizer(self.doc)
         self.toc_path = DATA / f"{slug}.toc.json"     # AI-built table of contents, if the user asked for one
         self.toc = build_toc(self.doc)
@@ -992,11 +1156,12 @@ class Book:
                 import traceback
                 traceback.print_exc()
                 self._ref_zones, self._refs = [], []
-            self._refs_by_year = {}
+            self._refs_by_year = {}   # one index per reference list: {zone: {year: [entries]}}
             for e in self._refs:
-                self._refs_by_year.setdefault(e["year"], []).append(e)
-                if e["year"][-1:].isalpha():
-                    self._refs_by_year.setdefault(e["year"][:-1], []).append(e)
+                by_year = self._refs_by_year.setdefault(e["zone"], {})
+                by_year.setdefault(e["year"], []).append(e)
+                if e["year"][:1].isdigit() and e["year"][-1:].isalpha():
+                    by_year.setdefault(e["year"][:-1], []).append(e)
         return self._refs
 
     def ref_public(self, e):
@@ -1006,13 +1171,15 @@ class Book:
         """Citations on page n (0-based): rects + the matching reference entries."""
         if not self.refs or any(start < n <= last for start, _, last in self._ref_zones):
             return []
+        zone = next((i for i, (start, _, _) in enumerate(self._ref_zones) if start >= n), len(self._ref_zones) - 1)
+        by_year = self._refs_by_year.get(zone, {})
         raw = self.sent._raw_page(n)
         out = []
         for sent in raw["sentences"]:
             if any(n == start and sent["rects"] and sent["rects"][0][1] >= y for start, y, _ in self._ref_zones):
                 continue   # the reference list itself
             toks = self.sent._toks.get(n, {}).get(sent["id"], [])
-            for st, en, ids in find_citations(sent["text"], self._refs_by_year):
+            for st, en, ids in find_citations(sent["text"], by_year):
                 lines = {}
                 for off, txt, rects in toks:
                     if off < en and off + len(txt) > st:   # token overlaps the citation (handles a leading "(")
@@ -1027,6 +1194,40 @@ class Book:
                     out.append({"sid": sent["id"], "label": sent["text"][st:en], "refs": ids,
                                 "rects": [[round(v, 2) for v in r] for r in lines.values()]})
         return out
+
+    @property
+    def text_path(self):
+        return self.ocr_path if self.ocr_state == "done" else self.pdf_path
+
+    def _start_ocr(self):
+        if not OCRMYPDF:
+            self.ocr_state = "unavailable"
+            return
+        self.ocr_state = "running"
+
+        def job():
+            tmp = self.ocr_path.with_name(self.ocr_path.name + ".part")
+            self.ocr_path.parent.mkdir(parents=True, exist_ok=True)
+            langs = self.cfg.get("ocr_languages") or "eng"
+            cmd = [OCRMYPDF, "--skip-text", "--optimize", "0", "--output-type", "pdf", "-l", langs, str(self.pdf_path), str(tmp)]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+                if proc.returncode != 0:
+                    raise RuntimeError((proc.stderr or "").strip().splitlines()[-1:] or f"ocrmypdf exited with {proc.returncode}")
+                tmp.replace(self.ocr_path)
+                self.doc = pymupdf.open(str(self.ocr_path))
+                self.sent = Sentencizer(self.doc)
+                if not self.toc_path.exists():
+                    self.toc = build_toc(self.doc)
+                if hasattr(self, "_refs"):
+                    del self._refs
+                self.ocr_state = "done"
+            except Exception as e:  # noqa
+                self.ocr_state, self.ocr_error = "failed", str(e)
+                print(f"OCR failed for {self.pdf_path.name}: {e}", file=sys.stderr)
+            finally:
+                tmp.unlink(missing_ok=True)
+        threading.Thread(target=job, daemon=True).start()
 
     def set_toc(self, toc):
         """Replace the table of contents (AI-built) or, with None, go back to bookmarks / the font guess."""
@@ -1079,6 +1280,7 @@ class Book:
             "zotero_uri": f"zotero://select/items/@{self.citekey}" if self.citekey else None,
             "default_voice": self.cfg["default_voice"], "progress": prog,
             "language": self.cfg.get("language", "en"), "dict_ok": _DS is not None,
+            "ocr": self.ocr_state, "ocr_error": self.ocr_error,
         }
 
 
@@ -1109,6 +1311,135 @@ def convert_ebook(src: Path) -> Path:
     return out
 
 
+MD_EXT = (".md", ".markdown")
+MD_CSS = """
+body { font-family: serif; font-size: 12pt; line-height: 1.5; }
+h1 { font-size: 18pt; margin: 0 0 10pt 0; } h2 { font-size: 15pt; margin: 14pt 0 8pt 0; }
+h3, h4, h5, h6 { font-size: 13pt; margin: 12pt 0 6pt 0; }
+p, li { margin: 0 0 9pt 0; }
+blockquote { margin: 0 0 9pt 18pt; font-style: italic; }
+p.fig { text-align: center; }
+code { font-family: monospace; }
+"""
+
+
+def _md_inline(s, images, base):
+    """One paragraph's inline Markdown -> HTML (emphasis, code, links, Obsidian wikilinks); images are pulled out into `images`."""
+    def img(ref):
+        p = (base / urllib.parse.unquote(ref)).resolve()
+        if p.is_file():
+            images.append(p)
+        return ""
+    s = re.sub(r"!\[[^\]]*\]\(<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\)", lambda m: img(m.group(1)), s)
+    s = re.sub(r"!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", lambda m: img(m.group(1)), s)     # Obsidian ![[embed]]
+    s = html_escape(s, quote=False)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", s)
+    s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?!\*)|(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?!\w)",
+               lambda m: f"<i>{m.group(1) or m.group(2)}</i>", s)
+    s = re.sub(r"==(.+?)==", r"\1", s)
+    s = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"\2", s)
+    s = re.sub(r"\[\[([^\]]+)\]\]", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
+    return s.strip()
+
+
+def md_to_html(text, base: Path):
+    """Enough Markdown for a paper draft: headings, paragraphs, lists, block quotes, emphasis and images.
+    Returns (html, image paths in order); images become their own centred blocks right after their paragraph."""
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)     # YAML front matter
+    text = re.sub(r"<!--.*?-->|%%.*?%%", "", text, flags=re.S)     # HTML / Obsidian comments
+    out, images = [], []
+
+    def figs(found):
+        for p in found:
+            out.append(f'<p class="fig"><img src="img{len(images)}{p.suffix.lower()}"/></p>')
+            images.append(p)
+
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n")):
+        lines = [ln for ln in block.strip("\n").split("\n") if ln.strip() and not re.fullmatch(r"\s*([-*_])(\s*\1){2,}\s*", ln)]
+        if not lines:     # blank, or only a --- / *** rule
+            continue
+        m = re.match(r"(#{1,6})\s+(.*?)\s*#*\s*$", lines[0])
+        if m:
+            lvl, found = len(m.group(1)), []
+            out.append(f"<h{lvl}>{_md_inline(m.group(2), found, base)}</h{lvl}>")
+            figs(found)
+            lines = lines[1:]
+            if not lines:
+                continue
+        if all(re.match(r"\s*([-*+]|\d+[.)])\s+", ln) or ln.startswith((" ", "\t")) for ln in lines):
+            tag = "ol" if re.match(r"\s*\d", lines[0]) else "ul"
+            items, found = [], []
+            for ln in lines:
+                if re.match(r"\s*([-*+]|\d+[.)])\s+", ln):
+                    items.append(re.sub(r"\s*([-*+]|\d+[.)])\s+", "", ln, count=1))
+                else:
+                    items[-1] += " " + ln.strip()
+            out.append(f"<{tag}>" + "".join(f"<li>{_md_inline(it, found, base)}</li>" for it in items) + f"</{tag}>")
+            figs(found)
+            continue
+        if all(ln.startswith(">") for ln in lines):
+            found = []
+            out.append("<blockquote>" + _md_inline(" ".join(ln.lstrip("> ") for ln in lines), found, base) + "</blockquote>")
+            figs(found)
+            continue
+        found = []
+        body = _md_inline(" ".join(ln.strip() for ln in lines), found, base)
+        if body:
+            out.append(f"<p>{body}</p>")
+        figs(found)
+    return "\n".join(out), images
+
+
+def convert_markdown(src: Path) -> Path:
+    """Lay out a Markdown file (e.g. a draft you are writing) as an A4 PDF next to it, headings becoming the contents.
+    `src` may be a symlink to a file elsewhere: edits there are picked up because mtime follows the link."""
+    out = src.with_suffix(".pdf")
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    real = src.resolve()
+    body, images = md_to_html(real.read_text(encoding="utf-8"), real.parent)
+    arch = pymupdf.Archive()
+    for i, p in enumerate(images):
+        arch.add((p.read_bytes(), f"img{i}{p.suffix.lower()}"))
+    story = pymupdf.Story(html=body, user_css=MD_CSS + "img { width: 100%; }", archive=arch)
+    buf = io.BytesIO()
+    mediabox = pymupdf.paper_rect("a4")
+    where = mediabox + (72, 72, -72, -72)
+    writer = pymupdf.DocumentWriter(buf)
+    more = 1
+    while more:
+        dev = writer.begin_page(mediabox)
+        more, _ = story.place(where)
+        story.draw(dev)
+        writer.end_page()
+    writer.close()
+    pdf = pymupdf.open("pdf", buf.getvalue())
+    pdf.subset_fonts()     # otherwise the whole CJK fallback font is embedded (~4 MB)
+    toc, pno, lvl = [], 0, 0
+    for level, title in re.findall(r"<h([1-6])>(.*?)</h\1>", body):     # find each heading on the page it landed on
+        key = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", title)).strip()
+        for n in range(pno, pdf.page_count):
+            blocks = [re.sub(r"\s+", " ", " ".join(sp["text"] for ln in b["lines"] for sp in ln["spans"])).strip()
+                      for b in pdf[n].get_text("dict")["blocks"] if b.get("lines")]
+            if html_unescape(key) in blocks:
+                lvl = min(int(level), lvl + 1)     # PDF outlines may not skip levels (# then ### becomes 1, 2)
+                toc.append([lvl, html_unescape(key), n + 1])
+                pno = n
+                break
+    pdf.set_toc(toc)
+    pdf.set_metadata({"title": real.stem, "author": ""})
+    part = out.with_name(out.name + ".part")
+    pdf.save(str(part), garbage=3, deflate=True)
+    part.replace(out)
+    return out
+
+
+def convert_source(src: Path) -> Path:
+    return convert_markdown(src) if src.suffix.lower() in MD_EXT else convert_ebook(src)
+
+
 _convert_lock = threading.Lock()
 _converting: dict = {}     # src -> Thread
 _convert_errors: dict = {}  # src -> message
@@ -1119,6 +1450,15 @@ def ebook_pdf(src: Path):
     out = src.with_suffix(".pdf")
     if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
         return out
+    if src.suffix.lower() in MD_EXT:     # a few pages of text: quick enough to lay out right away, and retried after every edit
+        try:
+            out = convert_markdown(src)
+            _convert_errors.pop(src, None)
+            return out
+        except Exception as e:  # noqa
+            _convert_errors[src] = str(e)
+            print(f"could not convert {src.name}: {e}", file=sys.stderr)
+            return None
     with _convert_lock:
         th = _converting.get(src)
         if th and th.is_alive():
@@ -1171,16 +1511,22 @@ class Library:
         self._save_registry()
         return slug
 
-    def register_zotero(self, citekey: str, file_idx=0):
+    def register_zotero(self, citekey: str, file_idx=None):
         e = self.bib.get(citekey)
         if not e:
             raise KeyError(f"{citekey} is not in the .bib export")
         if not e["files"]:
             raise KeyError(f"{citekey} has no PDF attachment on disk")
-        pdf = e["files"][min(file_idx, len(e["files"]) - 1)]
+        if file_idx is None:
+            pdf = pick_attachment(e["files"])
+        else:
+            pdf = e["files"][min(int(file_idx), len(e["files"]) - 1)]
         m = re.search(r"/storage/([A-Z0-9]{8})/", pdf)
         slug = "z-" + re.sub(r"[^A-Za-z0-9]+", "-", citekey).strip("-")
         old = self.registry.get(slug, {})
+        if old.get("pdf") and old["pdf"] != pdf:     # another attachment now: drop the text exported / OCR'd from the old one
+            shutil.rmtree(DATA / "books" / slug, ignore_errors=True)
+            (DATA / "ocr" / f"{slug}.pdf").unlink(missing_ok=True)
         self.registry[slug] = {
             "kind": "paper", "pdf": pdf, "citekey": citekey, "att_key": m.group(1) if m else None,
             "title": e["title"], "author": f"{e['short']} ({e['year']})",
@@ -1204,15 +1550,21 @@ class Library:
 
     def get(self, slug: str) -> Book:
         with self.lock:
-            if slug in self.open_books:
-                return self.open_books[slug]
             r = self.registry.get(slug)
             if not r:
                 raise KeyError(slug)
-            if not Path(r["pdf"]).exists():
+            pdf = Path(r["pdf"])
+            for src in (pdf.with_suffix(e) for e in MD_EXT if pdf.parent == BOOKS):
+                if src.exists():
+                    ebook_pdf(src)     # re-lays out the PDF if the Markdown was edited since
+            if not pdf.exists():
                 raise KeyError(f"PDF is missing: {r['pdf']}")
+            b = self.open_books.get(slug)
+            if b and b.pdf_path.stat().st_mtime == b.mtime:
+                return b
             b = Book(self.cfg, slug, r["pdf"], r["title"], r["author"], r["kind"],
                      r.get("citekey"), r.get("att_key"), r.get("zotero"))
+            b.mtime = pdf.stat().st_mtime
             self.open_books[slug] = b
             r["last_opened"] = dt.datetime.now().isoformat(timespec="seconds")
             self._save_registry()
@@ -1221,7 +1573,7 @@ class Library:
     def shelf(self):
         pending = []
         for src in sorted(BOOKS.iterdir()):
-            if src.suffix.lower() in EBOOK_EXT and ebook_pdf(src) is None:
+            if src.suffix.lower() in EBOOK_EXT + MD_EXT and ebook_pdf(src) is None:
                 pending.append({"slug": None, "kind": "book", "title": src.stem, "author": "", "converting": True,
                                 "error": _convert_errors.get(src), "exists": True, "page": None, "last_opened": None, "n_hl": 0})
         for pdf in sorted(BOOKS.glob("*.pdf")):
@@ -1421,6 +1773,7 @@ AI_MODELS = [   # Claude Code model aliases; the UI adds its own labels
     {"id": "fable", "label": "Fable 5.1"},
 ]
 CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+OCRMYPDF = shutil.which("ocrmypdf") or (os.path.exists("/opt/homebrew/bin/ocrmypdf") and "/opt/homebrew/bin/ocrmypdf") or None
 
 
 class ChatStore:
@@ -1443,7 +1796,7 @@ def export_book_text(book):
     """把整本书导出成 data/books/<slug>/full.txt（按页分隔）+ toc.txt，给 AI 用只读工具翻。"""
     d = DATA / "books" / book.slug
     full, tocf = d / "full.txt", d / "toc.txt"
-    if full.exists() and full.stat().st_mtime >= book.pdf_path.stat().st_mtime:
+    if full.exists() and full.stat().st_mtime >= book.text_path.stat().st_mtime:
         return d
     d.mkdir(parents=True, exist_ok=True)
     parts = []
@@ -1822,7 +2175,7 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Timer(0.3, lambda: os._exit(0)).start()
                 return
             if p == "/api/zotero/open":
-                slug = lib.register_zotero(body["citekey"], int(body.get("file_idx", 0)))
+                slug = lib.register_zotero(body["citekey"], body.get("file_idx"))
                 book = lib.get(slug)
                 return self._json({"slug": slug, "created_note": book.notes.created_note, "note_path": str(book.notes.md_path)})
             m = re.fullmatch(r"/api/b/([A-Za-z0-9_-]+)/(.*)", p)
@@ -1913,8 +2266,8 @@ def main():
         pdf = Path(a.pdf).expanduser().resolve()
         if not pdf.exists():
             sys.exit(f"PDF not found: {pdf}")
-        if pdf.suffix.lower() in EBOOK_EXT:
-            pdf = convert_ebook(pdf)
+        if pdf.suffix.lower() in EBOOK_EXT + MD_EXT:
+            pdf = convert_source(pdf)
         slug = lib.register_pdf(pdf, a.title, a.author)
         url += f"read/{slug}"
     Handler.lib = lib

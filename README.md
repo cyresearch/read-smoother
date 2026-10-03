@@ -17,6 +17,7 @@ Screen readers and audiobook apps supply the voice, but not the rest of what rea
 ## ✨ What it does
 
 - **Reads any text PDF aloud** with Microsoft neural voices (47 English voices; other locales configurable). Speed 0.6× to 2×. The current sentence is highlighted on the page and the page turns by itself. Sentences split across two pages are read as one; running headers, page numbers, publisher download stamps and footnotes are shown dimmed and skipped (click one to hear it anyway).
+- **Scanned PDFs** (old journal articles with no text layer) are recognised once with [ocrmypdf](https://ocrmypdf.readthedocs.io/) if it is installed (`brew install ocrmypdf`); the copy with the text layer is kept in `data/ocr/` and the original is not touched. Set `ocr_languages` in `config.json` (Tesseract codes such as `eng+deu`) for other languages.
 - **Contents sidebar** from the PDF's bookmarks, or guessed from font sizes and weights when there are none (publisher cover pages are skipped). When the guess is poor, one click has the AI read the text and rebuild the contents; the result is kept for that PDF. Click a heading and the voice jumps to it.
 - **Hover a citation** such as *Costa et al. (2000)* or *(Hoshino & Kroll, 2008)* and the matching entry from the paper's own reference list pops up: title, authors, journal. One click copies it or looks it up in your Zotero library, and if the PDF is there you can open it in Read Smoother straight away.
 - **Search the whole PDF** (`F` or `⌘F`): every match is listed with its page and context, matches are marked on the page, and a click jumps there.
@@ -72,6 +73,8 @@ Try it on the bundled public-domain book before pointing it at your own files:
 
 Add your own books by dropping PDFs into `books/` (they appear on the shelf; EPUB, MOBI and FB2 files are laid out as A4 PDFs on the spot, contents and metadata included) or with `./start.sh path/to/book.pdf --title "..." --author "..."`.
 
+To listen to something you are writing, put a Markdown file into `books/`, or better a symlink to it (`ln -s ~/paper/intro.md books/`): it is laid out as a PDF with its headings as the contents and its images in place, and laid out again whenever you save the draft, so reopening or refreshing the page always reads the latest version. Highlights made on an earlier version can drift once the text above them changes.
+
 To get a double-clickable app with a Chrome window and no terminal:
 
 ```bash
@@ -103,7 +106,7 @@ Runtime flags: `--port`, `--config other.json`, `--data-dir somewhere` (progress
 
 - **Sentences you play** are sent to Microsoft's text-to-speech endpoint through [edge-tts](https://github.com/rany2/edge-tts), which uses the same service as the Edge browser's read-aloud feature. It is not an official API. Audio is cached locally in `cache/`.
 - **When you ask the AI**: your question, the current page's text, the sentence context, your `profile.md`, and anything the AI reads with its tools go to Anthropic through Claude Code. External connectors (MCP servers) are disabled for these calls; the AI has read-only file tools and nothing else, unless you tick **Web** in the panel, which also lets it search the web and open pages through Claude Code's own tools (off by default, remembered per browser).
-- Dictionary lookups are offline. Zotero search reads a local file. Notes are local Markdown. There is no telemetry.
+- Dictionary lookups and OCR are offline. Zotero search reads a local file. Notes are local Markdown. There is no telemetry.
 
 ## ⌨️ Keys
 

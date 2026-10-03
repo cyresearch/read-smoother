@@ -8,7 +8,13 @@
   "paper_note_template": "templates/paper_note.md",
   "bib_path": "~/Obsidian/MyVault/library.bib",
   "default_voice": "en-US-AriaNeural",
-  "tts_locales": ["en"],
-  "ai_read_dirs": ["~/Obsidian/MyVault", "~/Documents"],
-  "profile_path": "profile.md"
+  "tts_locales": [
+    "en"
+  ],
+  "ai_read_dirs": [
+    "~/Obsidian/MyVault",
+    "~/Documents"
+  ],
+  "profile_path": "profile.md",
+  "ocr_languages": "eng"
 }

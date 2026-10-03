@@ -68,7 +68,9 @@ cp profile.example.md profile.md       # 任意: AI に自己紹介する
 ./start.sh demo/The-Elements-of-Style.pdf --title "The Elements of Style" --author "William Strunk Jr."
 ```
 
-自分の本は、PDF を `books/` に入れる（本棚に現れます）か、`./start.sh path/to/book.pdf --title "..." --author "..."` で追加します。
+自分の本は、PDF を `books/` に入れる（本棚に現れます。EPUB・MOBI・FB2 はその場で A4 の PDF に組まれ、目次とメタデータも残ります）か、`./start.sh path/to/book.pdf --title "..." --author "..."` で追加します。
+
+執筆中の原稿を聞きたいときは、Markdown ファイルを `books/` に入れるか、シンボリックリンクを置きます（`ln -s ~/paper/intro.md books/`）。見出しを目次、画像をその位置に置いた PDF に組まれ、原稿を保存するたびに組み直されるので、開き直すかページを再読み込みすれば常に最新版が読まれます。前の版で付けたハイライトは、それより前の文章が変わると位置がずれることがあります。
 
 ターミナルなしでダブルクリックで開く、Chrome ウィンドウ付きのアプリを作るには:
 

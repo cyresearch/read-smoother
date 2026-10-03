@@ -111,6 +111,7 @@
   .msg.ai .t table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
   .msg.ai .t th, .msg.ai .t td { border: 1px solid var(--line); padding: 3px 6px; }
   .msg.ai.err .t { white-space: pre-wrap; }
+  .msg.user .ts { display: block; color: var(--muted); font-size: 11px; text-align: right; margin-top: 3px; white-space: nowrap; }
   .msg.ai .meta { color: var(--muted); font-size: 11px; margin-top: 6px; display: flex; gap: 6px; align-items: center; }
   .msg.ai .meta button { padding: 1px 7px; font-size: 11px; }
   .msg.ai.err { border-color: #e0a0a0; color: #a33; }
@@ -365,6 +366,9 @@
     "选高亮颜色 (C 键切换)": "Highlight colour (C cycles)", "高亮颜色：{name}": "Highlight colour: {name}", "这个颜色代表什么（可不填）": "What this colour stands for (optional)",
     "橙": "orange", "黄": "yellow", "绿": "green", "蓝": "blue", "紫": "purple", "红": "red", "颜色已改": "Colour changed",
     "点圆点选当前颜色；旁边可以写它代表什么": "Click a dot to pick the current colour; write what it stands for next to it",
+    "这是扫描件，正在识别文字，通常要半分钟左右…": "This is a scan; recognising the text, usually about half a minute…",
+    "文字识别完成，可以朗读了": "Text recognised; ready to read", "文字识别失败：": "Text recognition failed: ",
+    "这是没有文字层的扫描件；装上 ocrmypdf（brew install ocrmypdf）后畅读会自动识别": "This scan has no text layer; install ocrmypdf (brew install ocrmypdf) and Read Smoother will recognise it automatically",
     "复制": "Copy", "已复制文献": "Reference copied", "在 Zotero 里找": "Find in Zotero", "Zotero 里没有这篇": "Not in your Zotero library", "用畅读打开": "Open in Read Smoother",
     "鼠标停在正文里的引用上（如 Costa et al., 2000）：弹出文末的那条文献": "Hover a citation in the text (e.g. Costa et al., 2000): the entry from the reference list pops up",
     "🔍 搜索": "🔍 Search", "搜索": "Search", "搜索全文 (F 或 ⌘F)": "Search the text (F or ⌘F)", "搜索全文… 回车搜索": "Search the text… Enter to search",
@@ -388,6 +392,7 @@
     document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
     if (S.book) $("title").textContent = S.book.title + (S.book.author ? " · " + S.book.author : "");
     renderQuick(); renderNotesPane(); updateAiCtx(); labelModels();
+    document.querySelectorAll("#ai-msgs .ts").forEach(el => { if (el.dataset.at) el.textContent = tsLabel(el); });
     if (S.toc) renderTocList();
   }
   function setLang(l) { LANG = l; localStorage.setItem("lang", l); applyLang(); }
@@ -436,7 +441,7 @@
   document.addEventListener("click", (e) => { if (!e.target.closest("#palette, #btn-hl-color")) $("palette").classList.remove("show"); });
   async function setNoteColor(n, c) { await post(B + "/notes/" + n.id, { color: c }, "PUT"); toast(t("颜色已改")); await refreshNotes(); }
 
-  const toast = (m) => { const el = $("toast"); el.textContent = m; el.classList.add("show"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 1800); };
+  const toast = (m, ms = 1800) => { const el = $("toast"); el.textContent = m; el.classList.add("show"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), ms); };
   const sents = () => (S.pageData ? S.pageData.sentences : []);
   const readable = (s) => s && !s.skip;
 
@@ -450,6 +455,7 @@
     if (S.book.zotero_uri) $("btn-zotero").style.display = "";
     if (S.book.obsidian_uri) $("btn-obsidian").style.display = "";
     if (!S.book.dict_ok) { $("btn-dict").title = t("查词需要 macOS 自带词典"); }
+    watchOcr();
     $("pageno").max = S.book.pages;
     S.voice = localStorage.getItem("voice") || S.book.default_voice;
     S.rate = parseFloat(localStorage.getItem("rate") || "1");
@@ -464,6 +470,21 @@
     const start = (local && local.t > (prog.t || 0)) ? local : prog;
     await gotoPage(start.page || 1, start.sid ?? -1, false);
     window.addEventListener("resize", () => renderPage(false));
+  }
+
+  function watchOcr() {   // scanned PDFs get a text layer from ocrmypdf in the background; reload the page when it lands
+    if (S.book.ocr === "running") {
+      toast(t("这是扫描件，正在识别文字，通常要半分钟左右…"), 5000);
+      if (S.ocrTimer) return;
+      S.ocrTimer = setInterval(async () => {
+        let b; try { b = await api(B + "/info"); } catch (e) { return; }
+        if (b.ocr === "running") { toast(t("这是扫描件，正在识别文字，通常要半分钟左右…"), 3200); return; }
+        clearInterval(S.ocrTimer); S.ocrTimer = null; S.book = b;
+        if (b.ocr === "done") { toast(t("文字识别完成，可以朗读了")); loadToc(); gotoPage(S.page, -1, false); }
+        else toast(t("文字识别失败：") + (b.ocr_error || ""), 6000);
+      }, 3000);
+    } else if (S.book.ocr === "unavailable") toast(t("这是没有文字层的扫描件；装上 ocrmypdf（brew install ocrmypdf）后畅读会自动识别"), 8000);
+    else if (S.book.ocr === "failed") toast(t("文字识别失败：") + (S.book.ocr_error || ""), 6000);
   }
 
   async function loadToc() {
@@ -646,7 +667,7 @@
       sel.onclick = (ev) => { ev.stopPropagation(); location.href = "zotero://select/items/@" + it.citekey; }; row.appendChild(sel);
       if (it.has_pdf) {
         const op = document.createElement("button"); op.textContent = t("用畅读打开");
-        op.onclick = async (ev) => { ev.stopPropagation(); try { const r2 = await post("/api/zotero/open", { citekey: it.citekey, file_idx: 0 }); window.open("/read/" + r2.slug, "_blank"); } catch (err) { toast(err.message); } };
+        op.onclick = async (ev) => { ev.stopPropagation(); try { const r2 = await post("/api/zotero/open", { citekey: it.citekey }); window.open("/read/" + r2.slug, "_blank"); } catch (err) { toast(err.message); } };
         row.appendChild(op);
       }
       z.appendChild(row);
@@ -923,14 +944,31 @@
     }
     el.textContent = text;
   }
+  // when a message was sent: the question shows the date too, the answer only the time unless it came on another day
+  function fmtTs(at, withDate) {
+    const o = { hour: "2-digit", minute: "2-digit", hour12: false };
+    if (withDate) Object.assign(o, { year: "numeric", month: LANG === "en" ? "short" : "long", day: "numeric" });
+    return at.toLocaleString(LANG === "en" ? "en-US" : "zh-CN", o);
+  }
+  function tsLabel(el) { return fmtTs(new Date(el.dataset.at), el.dataset.full === "1"); }
   function addMsg(role, text, meta = {}) {
     const box = $("ai-msgs");
     const d = document.createElement("div"); d.className = "msg " + (role === "user" ? "user" : "ai") + (meta.error ? " err" : "");
-    if (role === "user") { d.textContent = text; }
+    const at = meta.ts ? new Date(meta.ts) : new Date();   // stored as local time without a zone, which Date reads as local
+    const ts = document.createElement("span"); ts.className = "ts"; ts.dataset.at = isNaN(at) ? "" : at.toISOString();
+    if (role === "user") {
+      d.dataset.q = text;
+      const body = document.createElement("div"); body.textContent = text; d.appendChild(body);
+      ts.dataset.full = "1";
+      if (ts.dataset.at) { ts.textContent = tsLabel(ts); d.appendChild(ts); }
+    }
     else {
       const body = document.createElement("div"); body.className = "t"; if (meta.error) body.textContent = meta.error; else renderMd(body, text); d.appendChild(body);
       const mt = document.createElement("div"); mt.className = "meta";
-      const lab = document.createElement("span"); lab.textContent = (meta.model || "") + (meta.page ? " · p." + meta.page : ""); mt.appendChild(lab);
+      const prev = box.lastElementChild && box.lastElementChild.querySelector(".ts");
+      ts.dataset.full = prev && prev.dataset.at && new Date(prev.dataset.at).toDateString() === at.toDateString() ? "0" : "1";
+      const lab = document.createElement("span"); lab.textContent = (meta.model || "") + (meta.page ? " · p." + meta.page : "") + (ts.dataset.at ? " · " : ""); mt.appendChild(lab);
+      if (ts.dataset.at) { ts.textContent = tsLabel(ts); lab.appendChild(ts); }
       const save = document.createElement("button"); save.textContent = t("存为感想"); save.title = t("把这问答存到当前句的摘录感想里");
       save.onclick = () => saveQA(d);
       const spk = document.createElement("button"); spk.textContent = "🔊"; spk.title = t("读出回答");
@@ -941,7 +979,7 @@
     return d;
   }
   async function saveQA(aiDiv) {
-    const q = aiDiv.previousElementSibling && aiDiv.previousElementSibling.classList.contains("user") ? aiDiv.previousElementSibling.textContent : "";
+    const q = aiDiv.previousElementSibling && aiDiv.previousElementSibling.classList.contains("user") ? aiDiv.previousElementSibling.dataset.q : "";
     const a = aiDiv.querySelector(".t").dataset.raw || aiDiv.querySelector(".t").textContent;
     if (S.cur < 0) { toast(t("先选一句")); return; }
     let n = noteOfSid(S.cur);
