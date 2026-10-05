@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "tts_locales": ["en"],            # which voices to list (locale prefixes)
     "ai_read_dirs": [],               # folders the AI may read (read-only); paths typed into a question are added on the fly
     "profile_path": "profile.md",     # a short note about you, injected into the AI's system prompt
+    "app_name": "Read Smoother",      # name under the Dock icon once Chrome installs the reader as an app
 }
 
 
@@ -2074,11 +2075,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if p == "/":
                 return self._file(STATIC / "library.html", "text/html; charset=utf-8")
+            if p == "/manifest.webmanifest":   # lets Chrome install the reader as an app with its own Dock icon
+                name = lib.cfg.get("app_name") or "Read Smoother"
+                man = {"id": "/", "name": name, "short_name": name, "start_url": "/", "scope": "/", "display": "standalone",
+                       "background_color": "#faf7f0", "theme_color": "#c4643c",
+                       "launch_handler": {"client_mode": "focus-existing"},   # opening it again brings back the open window
+                       "icons": [{"src": f"/static/icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"} for n in (192, 512)]}
+                return self._send(200, json.dumps(man, ensure_ascii=False).encode(), "application/manifest+json", {"Cache-Control": "no-store"})
             if p.startswith("/static/"):
                 f = (STATIC / p[len("/static/"):]).resolve()
                 if not str(f).startswith(str(STATIC)) or not f.exists():
                     return self._send(404, b"not found", "text/plain")
-                ctype = {"js": "application/javascript", "css": "text/css", "html": "text/html; charset=utf-8"}.get(f.suffix[1:], "application/octet-stream")
+                ctype = {"js": "application/javascript", "css": "text/css", "html": "text/html; charset=utf-8", "png": "image/png"}.get(f.suffix[1:], "application/octet-stream")
                 return self._file(f, ctype)
             m = re.fullmatch(r"/read/([A-Za-z0-9_-]+)", p)
             if m:

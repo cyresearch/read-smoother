@@ -75,14 +75,21 @@ Add your own books by dropping PDFs into `books/` (they appear on the shelf; EPU
 
 To listen to something you are writing, put a Markdown file into `books/`, or better a symlink to it (`ln -s ~/paper/intro.md books/`): it is laid out as a PDF with its headings as the contents and its images in place, and laid out again whenever you save the draft, so reopening or refreshing the page always reads the latest version. Highlights made on an earlier version can drift once the text above them changes.
 
-To get a double-clickable app with a Chrome window and no terminal:
+To get a double-clickable Mac app with its own window and Dock icon (it starts the server when opened and stops it when you quit; needs the Xcode command line tools):
+
+```bash
+app/build-app.sh                              # builds ~/Desktop/Read Smoother.app
+app/build-app.sh "My Reader" ~/Applications   # or pick a name and a folder
+```
+
+The app remembers where the repository is, so build it again if you move the folder. If you would rather keep the reader in a Chrome window, there is an AppleScript launcher instead:
 
 ```bash
 osacompile -o ~/Desktop/"Read Smoother.app" app/read-smoother.applescript
 cp app/icon.icns ~/Desktop/"Read Smoother.app"/Contents/Resources/applet.icns
 ```
 
-Edit the `proj` line in the script first if you cloned the repository somewhere other than `~/projects/read-smoother`. The shelf page has a "Quit" button that stops the background server.
+For the launcher, edit the `proj` line in the script first if you cloned the repository somewhere other than `~/projects/read-smoother`. The shelf page has a "Quit" button that stops the background server.
 
 ## ⚙️ Configuration
 

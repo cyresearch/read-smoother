@@ -72,14 +72,21 @@ cp profile.example.md profile.md       # 任意: AI に自己紹介する
 
 執筆中の原稿を聞きたいときは、Markdown ファイルを `books/` に入れるか、シンボリックリンクを置きます（`ln -s ~/paper/intro.md books/`）。見出しを目次、画像をその位置に置いた PDF に組まれ、原稿を保存するたびに組み直されるので、開き直すかページを再読み込みすれば常に最新版が読まれます。前の版で付けたハイライトは、それより前の文章が変わると位置がずれることがあります。
 
-ターミナルなしでダブルクリックで開く、Chrome ウィンドウ付きのアプリを作るには:
+ダブルクリックで開く Mac アプリ（専用のウィンドウと Dock アイコン付き。起動時にサーバーを立ち上げ、終了時に止めます。Xcode コマンドラインツールが必要）を作るには:
+
+```bash
+app/build-app.sh                              # ~/Desktop/Read Smoother.app を作成
+app/build-app.sh "My Reader" ~/Applications   # 名前と場所を指定することもできます
+```
+
+アプリはリポジトリの場所を覚えているので、フォルダを移動したら作り直してください。Chrome のウィンドウで使いたい場合は、AppleScript のランチャーもあります:
 
 ```bash
 osacompile -o ~/Desktop/"Read Smoother.app" app/read-smoother.applescript
 cp app/icon.icns ~/Desktop/"Read Smoother.app"/Contents/Resources/applet.icns
 ```
 
-リポジトリを `~/projects/read-smoother` 以外に置いた場合は、先にスクリプトの `proj` の行を直してください。本棚ページの「Quit」ボタンでバックグラウンドのサーバーを止められます。
+ランチャーを使う場合、リポジトリを `~/projects/read-smoother` 以外に置いたときは、先にスクリプトの `proj` の行を直してください。本棚ページの「Quit」ボタンでバックグラウンドのサーバーを止められます。
 
 ## ⚙️ 設定
 

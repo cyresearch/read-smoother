@@ -16,5 +16,6 @@
     "~/Documents"
   ],
   "profile_path": "profile.md",
-  "ocr_languages": "eng"
+  "ocr_languages": "eng",
+  "app_name": "Read Smoother"
 }

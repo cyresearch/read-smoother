@@ -16,9 +16,17 @@ if code is not "200" then
 	end repeat
 end if
 if code is "200" then
+	-- A dedicated profile (data/chrome-app) so an already-running Chrome cannot swallow the request.
+	set chromeProfile to proj & "/data/chrome-app"
+	-- Installed as an app (Chrome: Install page as app)? Then open that, so it gets its own Dock icon.
+	set appID to do shell script "for a in ~/Applications/Chrome\\ Apps.localized/*.app; do case \"$(/usr/libexec/PlistBuddy -c 'Print :CrAppModeUserDataDir' \"$a/Contents/Info.plist\" 2>/dev/null)\" in " & quoted form of chromeProfile & "/*) /usr/libexec/PlistBuddy -c 'Print :CrAppModeShortcutID' \"$a/Contents/Info.plist\"; break;; esac; done; true"
+	if appID is "" then
+		set target to "--app=" & theURL
+	else
+		set target to "--app-id=" & appID
+	end if
 	try
-		-- A dedicated profile (data/chrome-app) so an already-running Chrome cannot swallow the --app request.
-		do shell script "open -na 'Google Chrome' --args --user-data-dir=" & quoted form of (proj & "/data/chrome-app") & " --no-first-run --no-default-browser-check --app=" & theURL
+		do shell script "open -na 'Google Chrome' --args --user-data-dir=" & quoted form of chromeProfile & " --no-first-run --no-default-browser-check " & target
 	on error
 		open location theURL
 	end try
