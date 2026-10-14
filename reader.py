@@ -31,12 +31,11 @@ from html import escape as html_escape, unescape as html_unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import pymupdf
-
 try:
+    import pymupdf
     import edge_tts
 except ImportError:  # pragma: no cover
-    sys.exit("请先 pip install edge-tts pymupdf")
+    sys.exit("Missing dependencies. Run: pip install -r requirements.txt")
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
