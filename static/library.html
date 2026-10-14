@@ -48,6 +48,11 @@
   <div class="hint" id="bibhint"></div>
   <div id="zresults"></div>
 
+  <div id="lists-wrap" hidden>
+    <h2 data-i18n="阅读清单">阅读清单</h2>
+    <div id="lists"></div>
+  </div>
+
   <h2 data-i18n="最近在读">最近在读</h2>
   <div id="shelf"></div>
   <div class="hint" data-i18n-html="add-book"></div>
@@ -66,7 +71,7 @@
     "畅读": "Read Smoother", "边听边读，摘录进笔记": "listen while you read; highlights go to your notes",
     "从 Zotero 找论文": "Find a paper in Zotero",
     "输入作者、年份、题目关键词或 citekey，比如  smith 2019 priming": "Author, year, title words or citekey, e.g.  smith 2019 priming",
-    "最近在读": "Recently read", "关闭畅读服务": "Quit Read Smoother", "关掉后双击桌面上的畅读 App 可以再开。": "Double-click the Read Smoother app to start it again.",
+    "阅读清单": "Reading lists", "最近在读": "Recently read", "关闭畅读服务": "Quit Read Smoother", "关掉后双击桌面上的畅读 App 可以再开。": "Double-click the Read Smoother app to start it again.",
     "索引来自 {file}（Better BibTeX 自动导出，Zotero 一变它就更新）": "Index from {file} (Better BibTeX auto-export; it updates whenever Zotero changes)",
     "还没配置 Zotero：在 config.json 里把 bib_path 指向 Better BibTeX 自动导出的 .bib 文件": "Zotero is not configured: point bib_path in config.json at a Better BibTeX auto-export (.bib)",
     "找不到 .bib 文件：{path}": ".bib file not found: {path}",
@@ -168,6 +173,11 @@
 
   $("quit").onclick = async () => { if (!confirm(t("关闭畅读的后台服务？"))) return; try { await api("/api/quit", { method: "POST", body: "{}" }); } catch (e) {} document.body.innerHTML = '<div class="wrap"><h1>' + esc(t("畅读已关闭")) + '</h1><div class="hint">' + esc(t("关掉后双击桌面上的畅读 App 可以再开。")) + "</div></div>"; };
   applyLang();
+  api("/api/lists").then(d => {
+    if (!d.lists || !d.lists.length) return;
+    $("lists").innerHTML = d.lists.map(x => '<a href="/lists/' + encodeURIComponent(x.name) + '">' + esc(x.title) + "</a>").join("<br>");
+    $("lists-wrap").hidden = false;
+  }).catch(() => {});
   loadShelf().catch(e => { $("shelf").innerHTML = '<div class="empty"></div>'; $("shelf").firstChild.textContent = t("载入失败：") + e.message; });
 })();
 </script>

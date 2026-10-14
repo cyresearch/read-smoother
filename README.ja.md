@@ -50,6 +50,8 @@ Read Smoother が書くのは普通の Markdown です。`vault_path` を Obsidi
 
 Zotero については、Better BibTeX が自動エクスポートする `.bib` ファイル（各文献の PDF パスを含む）を読むので、Zotero が起動していなくても動きます。
 
+**読書リスト。** 単体で完結した HTML ページをリスト用フォルダ（既定は `data/lists/`）に `<名前>.html` として置くと、`/lists/<名前>` で開け、本棚からもリンクされます。たとえば自分や AI アシスタントが作った文献一覧のようなページで、項目ごとにコメントを一つ残せます。`GET /api/lists/<名前>/comments` で全件を読み、`PUT /api/lists/<名前>/comments/<key>` に `{"text": "..."}` を送ると一件保存します。`<名前>.json` の `comments_note` で vault 内のノートを指定すると、各コメントはそのノートの `%% list-note:begin KEY %%` と `%% list-note:end KEY %%` の間に書かれ、Obsidian からも直接編集できます。ページの隣には JSON のバックアップも残ります。ページから論文を Read Smoother で開くには `POST /api/zotero/open` に `{"citekey": "..."}` を送ります。
+
 ## 🚀 はじめかた
 
 必要なもの: macOS（辞書とデスクトップランチャーがシステム機能を使います。それ以外は素の Python なので他の OS でも辞書なしで動くはずですが、macOS でしかテストされていません）、Python 3.10 以上、音声のためのインターネット接続、アプリ風ウィンドウが欲しければ Google Chrome、AI パネルが欲しければ [Claude Code](https://claude.com/claude-code)。
@@ -103,6 +105,7 @@ cp app/icon.icns ~/Desktop/"Read Smoother.app"/Contents/Resources/applet.icns
 | `default_voice`, `tts_locales` | 既定の声と、声のメニューに出すロケール（例 `["en", "ja"]`）。 |
 | `ai_read_dirs` | AI が読めるフォルダ。読み取り専用、既定は空。 |
 | `profile_path` | AI に渡すプロフィール。 |
+| `lists_dir` | 読書リストを置くフォルダ。空ならデータフォルダ内の `lists`。 |
 
 実行時フラグ: `--port`、`--config other.json`、`--data-dir somewhere`（進捗、ハイライトの位置、会話の保存先。既定は `./data`）、`--no-browser`。
 

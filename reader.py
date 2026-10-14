@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     "ai_read_dirs": [],               # folders the AI may read (read-only); paths typed into a question are added on the fly
     "profile_path": "profile.md",     # a short note about you, injected into the AI's system prompt
     "app_name": "Read Smoother",      # name under the Dock icon once Chrome installs the reader as an app
+    "lists_dir": "",                  # reading lists (<name>.html + <name>.json); "" = <data dir>/lists
 }
 
 
@@ -2035,6 +2036,123 @@ def list_voices(locales=("en",)):
 # HTTP
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# Reading lists: a page you (or an AI helper) generate, with a comment box per entry.
+# Comments live in one Markdown note in the vault, one marked block per entry, so they
+# can be written on the list page or in Obsidian; a JSON copy is kept next to the page.
+# ----------------------------------------------------------------------------
+
+LIST_TEXT = {
+    "en": {"callout": "> [!info]- This note is kept by a Read Smoother reading list\n"
+                      "> Write in the comment boxes on the list page or edit the text here: both are the same note. "
+                      "Keep the `%% ... %%` marker lines.",
+           "page": "List page: ", "lists": "Reading lists", "none": "No reading lists yet."},
+    "zh": {"callout": "> [!info]- 这份笔记由畅读的阅读清单维护\n"
+                      "> 评论可以在清单页的评论框里写，也可以直接在这里改，两边是同一份。标记行 `%% ... %%` 请保留。",
+           "page": "清单页：", "lists": "阅读清单", "none": "还没有阅读清单。"},
+}
+
+
+class ListStore:
+    """<lists_dir>/<name>.html is the page; <name>.json (optional) holds
+    {"title", "note_title", "comments_note": "<path inside the vault>.md", "items": [{"key", "heading", "link"}]}.
+    Each comment is the text between `%% list-note:begin KEY %%` and `%% list-note:end KEY %%`
+    in comments_note; without a note the comments are kept in <name>.comments.json only."""
+
+    def __init__(self, cfg, port):
+        self.cfg = cfg
+        self.port = port
+        self.dir = cfg_path(cfg, "lists_dir", None) or (DATA / "lists")
+        self.lock = threading.Lock()
+
+    def t(self):
+        return LIST_TEXT.get(self.cfg.get("language"), LIST_TEXT["en"])
+
+    def meta(self, name):
+        p = self.dir / f"{name}.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def html(self, name) -> Path:
+        p = self.dir / f"{name}.html"
+        if not p.exists():
+            raise KeyError(f"no reading list called {name}")
+        return p
+
+    def names(self):
+        if not self.dir.exists():
+            return []
+        return [{"name": h.stem, "title": self.meta(h.stem).get("title") or h.stem} for h in sorted(self.dir.glob("*.html"))]
+
+    def index_html(self):
+        t = self.t()
+        rows = "".join(f'<li><a href="/lists/{html_escape(x["name"])}">{html_escape(x["title"])}</a></li>' for x in self.names())
+        return (f'<!doctype html><meta charset="utf-8"><title>{t["lists"]}</title>'
+                '<style>body{font:16px/1.6 -apple-system,system-ui,sans-serif;max-width:40em;margin:3em auto;padding:0 16px}</style>'
+                f'<h1>{t["lists"]}</h1>' + (f"<ul>{rows}</ul>" if rows else f'<p>{t["none"]}</p>') + '<p><a href="/">←</a></p>')
+
+    def _note(self, meta):
+        rel, vault = meta.get("comments_note"), cfg_path(self.cfg, "vault_path", None)
+        return (vault / rel, rel) if rel and vault else (None, None)
+
+    @staticmethod
+    def _parse(doc):
+        return {m.group(1): m.group(2).strip("\n") for m in re.finditer(
+            r"^%% list-note:begin (\S+) %%[ \t]*\n(.*?)^%% list-note:end \1 %%[ \t]*$", doc, re.S | re.M)}
+
+    def comments(self, name):
+        self.html(name)
+        meta = self.meta(name)
+        path, rel = self._note(meta)
+        backup = self.dir / f"{name}.comments.json"
+        saved = json.loads(backup.read_text(encoding="utf-8")) if backup.exists() else {}
+        if path:
+            texts = self._parse(path.read_text(encoding="utf-8")) if path.exists() else {}
+            out = {k: {"text": v, "updated": (saved.get(k) or {}).get("updated")} for k, v in texts.items()}
+        else:
+            out = saved
+        uri = None
+        if rel and self.cfg.get("vault_name"):
+            uri = ("obsidian://open?vault=" + urllib.parse.quote(self.cfg["vault_name"])
+                   + "&file=" + urllib.parse.quote(rel[:-3] if rel.endswith(".md") else rel))
+        return {"comments": out, "note": rel, "obsidian_uri": uri}
+
+    def _new_note(self, name, meta):
+        t = self.t()
+        return (f"---\ntype: reading-list\nlist: {name}\n---\n# {meta.get('note_title') or meta.get('title') or name}\n\n"
+                f"{t['callout']}\n> {t['page']}http://127.0.0.1:{self.port}/lists/{name}\n")
+
+    @staticmethod
+    def _put(doc, key, text, meta):
+        begin, end = f"%% list-note:begin {key} %%", f"%% list-note:end {key} %%"
+        block = begin + "\n" + (text + "\n" if text else "") + end
+        pat = re.compile("^" + re.escape(begin) + r"[ \t]*\n.*?^" + re.escape(end) + r"[ \t]*$", re.S | re.M)
+        if pat.search(doc):
+            return pat.sub(lambda m: block, doc, count=1)
+        item = next((i for i in meta.get("items", []) if i.get("key") == key), {})
+        section = "## " + (item.get("heading") or key) + "\n" + (item["link"] + "\n" if item.get("link") else "") + block + "\n"
+        return doc.rstrip("\n") + "\n\n" + section
+
+    def save(self, name, key, text):
+        self.html(name)
+        meta = self.meta(name)
+        text = (text or "").replace("\r\n", "\n").strip("\n")
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self.lock:
+            backup = self.dir / f"{name}.comments.json"
+            saved = json.loads(backup.read_text(encoding="utf-8")) if backup.exists() else {}
+            path, _ = self._note(meta)
+            if path:
+                doc = path.read_text(encoding="utf-8") if path.exists() else self._new_note(name, meta)
+                doc = self._put(doc, key, text, meta)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(doc, encoding="utf-8")
+                texts = self._parse(doc)       # the backup mirrors the whole note, Obsidian edits included
+                saved = {k: {"text": v, "updated": (saved.get(k) or {}).get("updated")} for k, v in texts.items()}
+            saved[key] = {"text": text, "updated": now}
+            backup.write_text(json.dumps(saved, ensure_ascii=False, indent=1), encoding="utf-8")
+        return {"ok": True, "updated": now}
+
+
 class Handler(BaseHTTPRequestHandler):
     lib: Library = None  # injected in main()
 
@@ -2095,6 +2213,16 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/pdf/([A-Za-z0-9_-]+)", p)
             if m:
                 return self._file(lib.get(m.group(1)).pdf_path, "application/pdf")
+            if p in ("/lists", "/lists/"):
+                return self._send(200, self.lists.index_html().encode(), "text/html; charset=utf-8")
+            m = re.fullmatch(r"/lists/([A-Za-z0-9_-]+)", p)
+            if m:
+                return self._file(self.lists.html(m.group(1)), "text/html; charset=utf-8")
+            if p == "/api/lists":
+                return self._json({"lists": self.lists.names()})
+            m = re.fullmatch(r"/api/lists/([A-Za-z0-9_-]+)/comments", p)
+            if m:
+                return self._json(self.lists.comments(m.group(1)))
             if p == "/api/library":
                 return self._json({"items": lib.shelf(), "bib": str(lib.bib.path or ""),
                                    "bib_ok": bool(lib.bib.path and lib.bib.path.exists()),
@@ -2236,6 +2364,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         p = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
+        m = re.fullmatch(r"/api/lists/([A-Za-z0-9_-]+)/comments/([A-Za-z0-9_-]+)", p)
+        if m:
+            try:
+                return self._json(self.lists.save(m.group(1), m.group(2), self._body().get("text", "")))
+            except KeyError as e:
+                return self._json({"error": str(e)}, 404)
         m = re.fullmatch(r"/api/b/([A-Za-z0-9_-]+)/notes/([A-Za-z0-9]+)", p)
         if not m:
             return self._send(404, b"not found", "text/plain")
@@ -2279,6 +2413,7 @@ def main():
         slug = lib.register_pdf(pdf, a.title, a.author)
         url += f"read/{slug}"
     Handler.lib = lib
+    Handler.lists = ListStore(cfg, a.port)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     print(f"Read Smoother shelf: http://127.0.0.1:{a.port}/   (Ctrl+C to quit)")
     if a.pdf:

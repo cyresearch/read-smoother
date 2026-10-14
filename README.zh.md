@@ -50,6 +50,8 @@
 
 Zotero 这边，畅读读的是 Better BibTeX 自动导出的 `.bib` 文件，里面有每条文献的 PDF 路径，所以 Zotero 开不开都能用。
 
+**阅读清单。** 把一个自包含的 HTML 页面存成清单文件夹里的 `<名字>.html`（默认是 `data/lists/`），就能在 `/lists/<名字>` 打开，书架页上也有入口。这样的页面，比如你或 AI 助手生成的一张文献表，可以给每个条目留一条评论：`GET /api/lists/<名字>/comments` 读出全部，`PUT /api/lists/<名字>/comments/<key>` 加 `{"text": "..."}` 保存一条。如果 `<名字>.json` 里用 `comments_note` 指定了 vault 里的一份笔记，每条评论就写在这份笔记的 `%% list-note:begin KEY %%` 和 `%% list-note:end KEY %%` 之间，在 Obsidian 里也能直接改；页面旁边另存一份 JSON 备份。页面里要用畅读打开某篇论文，就 `POST /api/zotero/open` 加 `{"citekey": "..."}`。
+
 ## 🚀 开始使用
 
 需要：macOS（查词和桌面启动器用了系统功能；其余部分是纯 Python，理论上在别的系统也能跑，只是没了词典，而且目前只在 macOS 上测试过）、Python 3.10 以上、联网（语音）、想要独立窗口的话装 Google Chrome、想要 AI 面板的话装 [Claude Code](https://claude.com/claude-code)。
@@ -103,6 +105,7 @@ cp app/icon.icns ~/Desktop/"Read Smoother.app"/Contents/Resources/applet.icns
 | `default_voice`、`tts_locales` | 默认声音，以及声音菜单里列哪些语言（比如 `["en", "ja"]`）。 |
 | `ai_read_dirs` | AI 可以读的文件夹。只读，默认为空。 |
 | `profile_path` | 给 AI 看的自我介绍。 |
+| `lists_dir` | 阅读清单所在的文件夹。留空则用数据文件夹里的 `lists`。 |
 
 运行参数：`--port`、`--config 别的.json`、`--data-dir 某处`（进度、高亮位置和对话存在那里，默认 `./data`）、`--no-browser`。
 

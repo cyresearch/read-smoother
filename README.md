@@ -53,6 +53,8 @@ The `%% ... %%` lines are invisible in Obsidian's reading view and tell Read Smo
 
 For Zotero, Read Smoother reads the `.bib` file that Better BibTeX exports automatically, including each item's PDF path, so it works whether or not Zotero is running.
 
+**Reading lists.** A self-contained HTML page saved as `<name>.html` in the lists folder (`data/lists/` by default) opens at `/lists/<name>` and is linked from the shelf. Such a page, for example a literature table you or an AI helper generate, can keep one comment per entry: `GET /api/lists/<name>/comments` returns them and `PUT /api/lists/<name>/comments/<key>` with `{"text": "..."}` saves one. If `<name>.json` names a `comments_note` inside the vault, each comment is stored there between `%% list-note:begin KEY %%` and `%% list-note:end KEY %%`, so it can be edited in Obsidian as well; a JSON copy is kept next to the page. On the page, a paper opens in Read Smoother with `POST /api/zotero/open` and `{"citekey": "..."}`.
+
 ## 🚀 Getting started
 
 Requirements: macOS (the dictionary and the desktop launcher use system features; the rest of the app is plain Python and should run elsewhere with the dictionary disabled, but it has only been tested on macOS), Python 3.10 or newer, an internet connection for the voices, Google Chrome if you want the app-style window, and [Claude Code](https://claude.com/claude-code) if you want the AI panel.
@@ -106,6 +108,7 @@ All keys live in `config.json` (start from `config.example.json`). Relative path
 | `default_voice`, `tts_locales` | Default voice and which locales appear in the voice menu (for example `["en", "ja"]`). |
 | `ai_read_dirs` | Folders the AI may read. Read-only; empty by default. |
 | `profile_path` | Your profile for the AI. |
+| `lists_dir` | Folder for reading lists. Empty means `lists` inside the data folder. |
 
 Runtime flags: `--port`, `--config other.json`, `--data-dir somewhere` (progress, highlights geometry and chats live there; default `./data`), `--no-browser`.
 
