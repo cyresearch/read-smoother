@@ -127,7 +127,7 @@ FUNC_WORDS = {"the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "but"
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st"})     # so TTS, search and the dictionary see plain letters
 
 # Journal PDFs typeset around 2000 (old Cambridge fonts) store fi as ®, fl as ¯, the en dash as ± and accents as a
-# capital after the letter (SaÂnchez, LemhoÈfer, acceÁs, RoÃle, GarcãÂa). Fixed only where the ® = fi signature shows up.
+# capital after the letter (SaÂnchez, SchuÈtze, acceÁs, RoÃle, GarcãÂa). Fixed only where the ® = fi signature shows up.
 LEGACY_SIGNATURE = re.compile(r"[a-z]®[a-z]|(?<![A-Za-z])®[a-z]{2}")
 LEGACY_ACCENTS = {"Â": "́", "Á": "̀", "È": "̈", "Ã": "̂"}
 
@@ -504,7 +504,7 @@ def heuristic_toc(doc, max_pages=400):
 
 REF_HEADING = re.compile(r"^\s*(references?|reference list|bibliography|works cited|literature cited|参考文献|引用文献|文献)\s*$", re.I)
 YEAR_RE = re.compile(r"\b((?:1[6-9]|20)\d{2})([a-z])?\b")
-UNDATED_RE = re.compile(r"\b(in press|submitted|in preparation|forthcoming)\b", re.I)   # "Lemhöfer and Dijkstra (submitted)"
+UNDATED_RE = re.compile(r"\b(in press|submitted|in preparation|forthcoming)\b", re.I)   # "Krizhevsky and Hinton (submitted)"
 NAME_PARTICLES = {"van", "von", "de", "der", "den", "del", "della", "di", "da", "du", "la", "le", "ten", "ter", "te", "el", "al", "bin", "ibn", "mac", "mc", "st", "o"}
 
 
@@ -570,7 +570,7 @@ def parse_ref_entry(text):
                 if len(w) > 1 and w.lower() not in ("and", "eds", "ed", "et", "al")]
     first = [_fold(w) for w in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]+", authors.split(",")[0])]
     first = [w for w in first if len(w) > 1] or surnames[:1]
-    org = None   # corporate author ("R Core Team", "Institute of Language Teaching and Research"): cited by the whole name
+    org = None   # corporate author ("R Core Team", "OpenAI"): cited by the whole name
     if "," not in authors and not re.search(r"\b[A-Z]\.", authors) and 1 < len(authors.split()) <= 8:
         org = re.sub(r"[^\w\s'’\-]", " ", authors).split()
     return {"authors": authors, "year": year, "title": title, "source": source, "text": text,
@@ -703,7 +703,7 @@ def find_citations(text, refs_by_year):
                 hits.append((pos[-1], e["id"], primary))
         if not hits:
             continue
-        if any(h[2] for h in hits):   # "(Dijkstra, in press)" is Dijkstra's paper, not Van Hell & Dijkstra's
+        if any(h[2] for h in hits):   # "(Sejnowski, in press)" is Sejnowski's paper, not Hinton & Sejnowski's
             hits = [h for h in hits if h[2]]
         first_pos = min(p for p, _, _ in hits)
         hits = [i for p, i, _ in hits if p == first_pos] or [i for _, i, _ in hits]   # the first author is the leftmost name
@@ -711,7 +711,7 @@ def find_citations(text, refs_by_year):
             by_id = {e["id"]: e for e in cands}
             cited = {_fold(w) for w in re.findall(r"[A-ZÀ-Þ][A-Za-zÀ-ÿ'’\-]+", text[first_pos:m_start])} - NAME_PARTICLES
             et_al = "et al" in text[first_pos:m_start]
-            im = re.match(r"\S+,?\s+([A-Z])\.", text[first_pos:m_start])   # "Chen, Q. et al., 2017" vs Chen, L.
+            im = re.match(r"\S+,?\s+([A-Z])\.", text[first_pos:m_start])   # "He, K. et al., 2016" vs He, X.
 
             def fit(i):
                 e = by_id[i]
@@ -720,15 +720,15 @@ def find_citations(text, refs_by_year):
                     if em and em.group(1) != im.group(1):
                         return -99
                 names = e["_names"] - NAME_PARTICLES
-                n_authors = len(re.findall(r"[.)]\s*(?:,\s*&?|&)\s*(?=[A-Z])", e["authors"])) + 1   # "Dijkstra, A. (Ton) & Van Heuven, W. J. B." / "Brysbaert, M., & Van Wijnendaele, I." -> 2
+                n_authors = len(re.findall(r"[.)]\s*(?:,\s*&?|&)\s*(?=[A-Z])", e["authors"])) + 1   # "Hinton, G. (Geoff) & Salakhutdinov, R. R." / "LeCun, Y., & Bengio, Y." -> 2
                 return (len(cited & names) - len(cited - names) + (0.5 if e["year"] == ykey else 0)
                         - (2 if et_al and n_authors < 3 else 0)
-                        - (0 if et_al else 0.25 * max(0, n_authors - len(cited))))   # "Dijkstra (1998)": the single-author paper
+                        - (0 if et_al else 0.25 * max(0, n_authors - len(cited))))   # "Hopfield (1982)": the single-author paper
             best = max(fit(i) for i in hits)
             hits = [i for i in hits if fit(i) == best]
         # pull leading name particles ("van", "de") into the span
         while True:
-            pm = re.search(r"[(\[]?(\S+)\s+$", text[:first_pos])   # "(von Studnitz": the particle, not the bracket
+            pm = re.search(r"[(\[]?(\S+)\s+$", text[:first_pos])   # "(van der Maaten": the particle, not the bracket
             if pm and _fold(pm.group(1)) in NAME_PARTICLES:
                 first_pos = pm.start(1)
             else:
