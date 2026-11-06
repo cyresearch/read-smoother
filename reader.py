@@ -2019,22 +2019,92 @@ def _clean_env():
     return env
 
 
-def ai_toc(book, model="haiku"):
-    """Ask Claude to build the table of contents from the book's own text (papers without bookmarks)."""
+CONTENTS_HEAD = re.compile(r"(table of )?contents|contents in brief|目次|目录|目錄|inhoud|inhalt|inhaltsverzeichnis|sommaire|índice", re.I)
+
+
+def printed_contents(doc, first=30):
+    """0-based pages of the document's own printed table of contents: a page among the first ones that opens with a
+    'Contents' line, and the pages after it while they still look like one (many lines ending in a page number)."""
+    pages = []
+    for n in range(min(first, doc.page_count)):
+        lines = [l.strip() for l in doc[n].get_text().splitlines() if l.strip()]
+        if not pages:
+            if any(CONTENTS_HEAD.fullmatch(l) for l in lines[:8]):
+                pages.append(n)
+        elif len(lines) >= 5 and sum(bool(re.search(r"\b[\dvxlci]+$", l, re.I)) for l in lines) >= 0.25 * len(lines):
+            pages.append(n)
+        else:
+            break
+    return pages
+
+
+def heading_lines(doc, max_lines=3000):
+    """Every short line set apart from the body text (bold, or at least 1 pt larger), as 'p.N  SIZEpt [bold]  TEXT'.
+    Pieces of text at the same height, size and weight are joined, so a section number printed apart from its title
+    ('2.1' ... 'Methods') stays with it. Material for the AI table of contents of long documents."""
+    from collections import Counter
+    weight, rows = Counter(), []
+    legacy = has_legacy_encoding(doc)
+    for pno in range(doc.page_count):
+        same = {}
+        for b in doc[pno].get_text("dict", flags=pymupdf.TEXTFLAGS_WORDS)["blocks"]:
+            for ln in b.get("lines", []):
+                spans = [sp for sp in ln.get("spans", []) if sp["text"].strip()]
+                if not spans:
+                    continue
+                text = " ".join(sp["text"].strip() for sp in spans)
+                size = round(max(sp["size"] for sp in spans), 1)
+                bold = all(any(k in sp["font"].lower() for k in ("bold", "-bd", "black", "heavy", "semibold")) for sp in spans)
+                weight[size] += len(text)
+                same.setdefault((round(ln["bbox"][1]), size, bold), []).append((ln["bbox"][0], text))
+        for (y, size, bold), parts in sorted(same.items()):
+            rows.append((pno + 1, size, bold, " ".join(t for _, t in sorted(parts))))
+    if not rows:
+        return "", 0
+    body = weight.most_common(1)[0][0]
+    out = []
+    for page, size, bold, text in rows:
+        text = re.sub(r"\s+", " ", text.translate(LIGATURES)).strip()
+        if legacy:
+            text = fix_legacy(text)
+        if not (bold or size >= body + 1) or len(text) > 120 or len(text.split()) > 16:
+            continue
+        if not re.search(r"[^\W\d_]", text) and not (re.fullmatch(r"[\dIVXivx]{1,4}", text) and size >= body + 3):
+            continue   # numbers and symbols, except a large chapter number on its own
+        out.append(f"p.{page}\t{size}pt{' bold' if bold else ''}\t{text}")
+    return "\n".join(out[:max_lines]), body
+
+
+def ai_toc(book, model="sonnet"):
+    """Ask Claude to build the table of contents from the book's own text (papers without bookmarks).
+    A long book does not fit: then it gets the printed table of contents, if there is one, and every line set apart
+    from the body text by size or weight, with its page, size and weight."""
     book_dir = export_book_text(book)
     full = (book_dir / "full.txt").read_text(encoding="utf-8")
-    if len(full) > 400_000:   # a long book: give the font guess instead of the whole text
-        cands = "\n".join(f"p.{t['page']}: {t['title']}" for t in heuristic_toc(book.doc))
-        material = "[Candidate heading lines guessed from fonts; keep the real headings, drop the rest]\n" + cands
+    if len(full) > 400_000:
+        cands, body = heading_lines(book.doc)
+        material = ""
+        pc = printed_contents(book.doc)
+        if pc:
+            material += (f"[The document's printed table of contents, PDF pages {pc[0] + 1}-{pc[-1] + 1}]\n"
+                         + "\n".join(book.doc[n].get_text() for n in pc) + "\n\n")
+        material += (f"[Every short line set apart from the body text ({body}pt), as PAGE<TAB>SIZE and weight<TAB>TEXT; "
+                     "most are headings, some are figure labels, table cells or running headers]\n" + cands)
+        how = ("Take the structure and the wording of the headings from the printed table of contents when there is one, "
+               "and the deeper headings it leaves out from the lines list. The printed page numbers can differ from the PDF "
+               "pages (front matter, offsets): give the PDF page where the heading appears in the lines list. "
+               "Headings of the same size and weight are at the same level; larger or bolder is higher. "
+               "A chapter number printed on its own line belongs with the title that follows it. ")
     else:
         material = "[Full text; each page starts with '=== p.N ===']\n" + full
+        how = ""
     prompt = (
         f"Build the table of contents of this document. Title: \"{book.title}\"; author(s): {book.author}.\n"
-        "Output ONLY lines of the form  LEVEL<TAB>PAGE<TAB>TITLE  (LEVEL 1-3, PAGE = the '=== p.N ===' page where the heading "
+        "Output ONLY lines of the form  LEVEL<TAB>PAGE<TAB>TITLE  (LEVEL 1-4, PAGE = the PDF page where the heading "
         "appears). Include section and subsection headings in reading order (e.g. Abstract, Introduction, Method, Participants, "
         "Results, Discussion, References, Appendix; for a book: parts, chapters, sections). Skip the document title, author names, "
         "affiliations, journal/publisher boilerplate, running headers, figure and table captions. Copy heading text exactly. "
-        "If a heading has a number keep it. No other text.\n\n" + material)
+        "If a heading has a number (1, 2.3, 4.1.2, A.1) keep it in front of the title. " + how + "No other text.\n\n" + material)
     cmd = [CLAUDE_BIN, "-p", "--model", model, "--tools", "", "--permission-mode", "dontAsk",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--output-format", "json"]
     proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, env=_clean_env(), cwd=str(DATA), timeout=600)
@@ -2046,7 +2116,7 @@ def ai_toc(book, model="haiku"):
         out = proc.stdout
     toc = []
     for line in out.splitlines():
-        m = re.match(r"^\s*([123])\s*[\t|]\s*(?:p\.?\s*)?(\d+)\s*[\t|]\s*(.+?)\s*$", line)
+        m = re.match(r"^\s*([1-4])\s*[\t|]\s*(?:p\.?\s*)?(\d+)\s*[\t|]\s*(.+?)\s*$", line)
         if m and 0 < int(m.group(2)) <= book.doc.page_count:
             toc.append({"level": int(m.group(1)), "title": m.group(3), "page": int(m.group(2)), "ai": True})
     if not toc:
@@ -2505,7 +2575,7 @@ class Handler(BaseHTTPRequestHandler):
                 if sub == "toc/ai":
                     if not (CLAUDE_BIN and os.path.exists(CLAUDE_BIN)):
                         return self._json({"error": "claude CLI not found"}, 500)
-                    book.set_toc(ai_toc(book, body.get("model") or "haiku"))
+                    book.set_toc(ai_toc(book, body.get("model") or "sonnet"))
                     return self._json(book.toc)
                 if sub == "toc/reset":
                     book.set_toc(None)

@@ -47,6 +47,7 @@
   .t.l1 { font-weight: 600; color: var(--ink); margin-top: 8px; }
   .t.l2 { padding-left: 18px; }
   .t.l3 { padding-left: 30px; font-size: 12px; }
+  .t.l4 { padding-left: 42px; font-size: 12px; color: var(--muted); }
   .t.cur { background: var(--now); color: var(--ink); }
   .t .pg { float: right; color: var(--muted); font-size: 11px; margin-left: 6px; }
   #btn-toc.on { background: #d9d3c6; }
@@ -517,7 +518,8 @@
     return h;
   }
   async function aiToc(btn) {
-    const model = ($("ai-model").value || "haiku");
+    const chosen = $("ai-model").value || "sonnet";
+    const model = chosen === "haiku" ? "sonnet" : chosen;   // headings need judgement; Haiku is too weak for this
     if (!confirm(t("用 AI（{model}）通读全文重建目录？要几十秒，走本机 Claude Code。", { model }))) return;
     btn.disabled = true; btn.textContent = t("AI 正在整理目录…");
     try { S.toc = await post(B + "/toc/ai", { model }); renderTocList(); toast(t("目录已由 AI 整理")); }
