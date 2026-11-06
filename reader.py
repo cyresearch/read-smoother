@@ -152,6 +152,8 @@ class Sentencizer:
         self.doc = doc
         self._raw = {}
         self._cache = {}
+        self._links = {}
+        self._edges = {}
         self.legacy = has_legacy_encoding(doc)
 
     # -- 跨页拼句 --------------------------------------------------------------
@@ -186,6 +188,118 @@ class Sentencizer:
             return a.rstrip("-\u00ad") + b.lstrip()
         return a + " " + b.lstrip()
 
+    def _doc_body_size(self):
+        """The type size of the running text, by characters over up to 20 pages spread through the document.
+        Per page it can mislead: on a page full of boxes and references the small type has the most characters."""
+        if not hasattr(self, "_doc_body"):
+            from collections import Counter
+            weight = Counter()
+            pc = self.doc.page_count
+            for n in sorted({int(i * pc / 20) for i in range(20)} if pc > 20 else range(pc)):
+                for b in self.doc[n].get_text("dict", flags=pymupdf.TEXTFLAGS_WORDS)["blocks"]:
+                    for line in b.get("lines", []):
+                        for sp in line.get("spans", []):
+                            weight[round(sp["size"], 1)] += len(sp["text"].strip())
+            self._doc_body = weight.most_common(1)[0][0] if weight else 0
+        return self._doc_body
+
+    def _body_sentences(self, p):
+        """Readable sentences not in smaller type than the body text: leaves out figure captions, affiliations and
+        footnotes, which never continue on the next page. Larger is kept: some journals set the main text larger
+        than the boxes and references that make up most of the characters. The document's body size: a page given
+        over to footnotes or a table would otherwise count the footnote size as its body."""
+        body = self._doc_body_size() or p.get("body_size") or 0
+        return [s for s in p["sentences"] if not s["skip"] and s["rects"] and s.get("size", 0) >= body - 0.5]
+
+    @staticmethod
+    def _columns(p, sents):
+        """col(rect) -> 0 or 1. Two columns only when a good share of the body lines start right of 45% of the width."""
+        W = p["width"]
+        rects = [r for s in sents for r in s["rects"]]
+        two = bool(rects) and sum(r[0] > W * 0.45 for r in rects) >= 0.25 * len(rects)
+        return (lambda r: int(r[0] > W * 0.45)) if two else (lambda r: 0)
+
+    def _tails(self, p):
+        """Body sentences that could end the page's text, best first: lowest in the last column. PDFs do not always
+        store the columns in reading order, so position decides, not the order of the text. All of them, because
+        figure labels or a footnote in body type can sit below the last line; _link keeps only one that fills its
+        last line and is unfinished."""
+        ss = self._body_sentences(p)
+        if not ss:
+            return []
+        col = self._columns(p, ss)
+        return sorted(ss, key=lambda s: (col(s["rects"][-1]), s["rects"][-1][3], s["id"]), reverse=True)
+
+    def _heads(self, p):
+        """Body sentences that could start the page's text, best first: highest in the first column."""
+        ss = self._body_sentences(p)
+        if not ss:
+            return []
+        col = self._columns(p, ss)
+        return sorted(ss, key=lambda s: (col(s["rects"][0]), s["rects"][0][1], s["id"]))[:2]
+
+    def _link(self, n):
+        """(sid on page n, sid on page n + 1) of a sentence that runs over the page break, or None.
+        Main candidates: the body text by position, and the last and first readable sentences in text order (an
+        indented example in smaller type can run over the page too). Further down the page or the column, a pair
+        counts only when the next page's half starts in lower case or the first half ends in a hyphen, and the two
+        halves are in the same type size. The first half must always fill its last line."""
+        if n in self._links:
+            return self._links[n]
+        res = None
+        if 0 <= n and n + 1 < self.doc.page_count:
+            a, b = self._raw_page(n), self._raw_page(n + 1)
+
+            def small(s, p):
+                body = self._doc_body_size() or p.get("body_size") or 0
+                return bool(body) and s.get("size", 0) < body - 0.5
+
+            body_a = self._body_sentences(a) or [x for x in a["sentences"] if not x["skip"] and x["rects"]]
+            col_a = self._columns(a, body_a)
+            right = {}
+            for x in body_a:
+                for r in x["rects"]:
+                    right.setdefault(col_a(r), []).append(r[2])
+            right = {c: (sorted(v)[int(len(v) * 0.95)], sorted(r[0] for x in body_a for r in x["rects"] if col_a(r) == c)[0])
+                     for c, v in right.items()}
+
+            def runs_to_edge(s):
+                """A sentence broken by the page end fills its last line: figure labels and headings do not."""
+                if s["text"].rstrip().endswith(("-", "\u00ad")):
+                    return True
+                r = s["rects"][-1]
+                edge, left = right.get(col_a(r), (r[2], r[0]))
+                return r[2] >= edge - 0.2 * max(edge - left, 1)
+
+            def lower_start(y):
+                return y["text"].lstrip("(\"'“‘[")[:1].islower()
+
+            def wordy(y):   # not a row of panel letters (a b c d) or numbers
+                return re.search(r"[A-Za-z]{3,}", y["text"][:40]) is not None
+
+            tails, heads = self._tails(a), self._heads(b)
+            pairs = [(tails[0] if tails else None, heads[0] if heads else None, True),
+                     (self._last_readable(a), self._first_readable(b), True)]
+            pairs += [(x, y, False) for x in tails for y in heads + [self._first_readable(b)]]
+            found = []
+            for x, y, primary in pairs:
+                if not (x and y and x["rects"]):
+                    continue
+                dsize = abs(x.get("size", 0) - y.get("size", 0))
+                if not wordy(y) or not runs_to_edge(x) or (not primary and dsize > 1.0):
+                    continue   # a sentence keeps its type size over the page break (scanned pages: roughly)
+                if (small(x, a) or small(y, b)) and dsize > 0.5:
+                    continue   # an affiliation, caption or footnote does not continue into the next page's body
+                if not primary and not (lower_start(y) or x["text"].rstrip().endswith(("-", "\u00ad"))):
+                    continue   # other candidates need firmer evidence than a trailing comma or "the"
+                if self._spans_pages(x["text"], y["text"]):
+                    found.append((x["id"], y["id"], lower_start(y)))
+            # a head that starts in lower case is the surest continuation (a table title can sit above it)
+            found.sort(key=lambda f: not f[2])
+            res = found[0][:2] if found else None
+        self._links[n] = res
+        return res
+
     def page(self, n: int):
         """带跨页拼句的结果：末句若跨页，text 为完整句并标 continues；
         首句若是上一页的尾巴，text 也为完整句并标 continued（顺序朗读时跳过）。"""
@@ -193,18 +307,19 @@ class Sentencizer:
             return self._cache[n]
         import copy
         out = copy.deepcopy(self._raw_page(n))
-        last = self._last_readable(out)
-        if last and n + 1 < self.doc.page_count:
-            nxt = self._first_readable(self._raw_page(n + 1))
-            if nxt and self._spans_pages(last["text"], nxt["text"]):
-                last["text"] = self._join(last["text"], nxt["text"])
-                last["continues"] = True
-        first = self._first_readable(out)
-        if first and n > 0:
-            prv = self._last_readable(self._raw_page(n - 1))
-            if prv and self._spans_pages(prv["text"], first["text"]):
-                first["text"] = self._join(prv["text"], first["text"])
-                first["continued"] = True
+        link = self._link(n)
+        if link:
+            last = out["sentences"][link[0]]
+            last["text"] = self._join(last["text"], self._raw_page(n + 1)["sentences"][link[1]]["text"])
+            last["continues"] = True
+        link = self._link(n - 1)
+        if link:
+            first = out["sentences"][link[1]]
+            first["text"] = self._join(self._raw_page(n - 1)["sentences"][link[0]]["text"], first["text"])
+            first["continued"] = True
+        for s in out["sentences"]:
+            s.pop("size", None)
+        out.pop("body_size", None)
         self._cache[n] = out
         return out
 
@@ -220,14 +335,15 @@ class Sentencizer:
         for t in tokens:
             t["size0"] = sizes.get((t["rects"][0][4], t["rects"][0][5]), 0)
             t["size1"] = sizes.get((t["rects"][-1][4], t["rects"][-1][5]), 0)
-        edges = self._edge_zones(tokens, pg.rect.height)
-        sentences = self._split(tokens, pg.rect.height, edges)
+        running = self._repeats_nearby(n)
+        edges = self._edge_zones(tokens, pg.rect.height, running)
+        sentences = self._split(tokens, pg.rect.height, edges[:2])
         from collections import Counter
         weight = Counter()
         for t in tokens:
             weight[round(t["size0"])] += len(t["text"])
         body_size = weight.most_common(1)[0][0] if weight else 0
-        sentences = self._mark_skips(sentences, pg.rect, body_size, edges)
+        sentences = self._mark_skips(sentences, pg.rect, body_size, edges[:2], edges[2:])
         words = []
         self._toks[n] = {}
         for sent in sentences:
@@ -236,7 +352,9 @@ class Sentencizer:
                 if re.search(r"[A-Za-z]", t["text"]):
                     for r in t["rects"]:
                         words.append([round(r[0], 1), round(r[1], 1), round(r[2], 1), round(r[3], 1), t["text"], sent["id"], t["off"]])
-        out = {"page": n + 1, "width": pg.rect.width, "height": pg.rect.height, "sentences": sentences, "words": words}
+        fine = sorted(t["size0"] for t in tokens if t["size0"] and round(t["size0"]) == body_size for _ in t["text"])
+        out = {"page": n + 1, "width": pg.rect.width, "height": pg.rect.height, "sentences": sentences, "words": words,
+               "body_size": fine[len(fine) // 2] if fine else 0}   # median size of the body text, by characters
         self._raw[n] = out
         return out
 
@@ -276,31 +394,84 @@ class Sentencizer:
         return toks
 
     @staticmethod
-    def _edge_zones(tokens, H):
-        """(header_y, footer_y): the running header / footer lines, found as text at the very top or bottom
-        that is separated from the body by a blank gap of about two lines. Either may be None."""
-        ys = []
-        for y in sorted(round(t["rects"][0][1]) for t in tokens):
-            if not ys or y - ys[-1] > 3:      # lines of two columns rarely align exactly: cluster within 3 pt
-                ys.append(y)
-        if len(ys) < 4:
-            return None, None
+    def _edge_zones(tokens, H, running=None):
+        """(header_y, footer_y, header_running, footer_running).
+        header_y / footer_y: the running header / footer lines, found as text at the very top or bottom of the text
+        that is separated from the body by a blank gap of about two lines; either may be None. Within the top 12% /
+        bottom 15% of the page that gap is enough. Further in (a small text block centred on a large page), or with
+        a smaller gap, the line must also recur at the same height on a neighbouring page: running(key, y) says so.
+        header_running / footer_running: the zone was confirmed that way, so it is not read aloud."""
+        cl = Sentencizer._line_clusters(tokens)
+        if len(cl) < 4:
+            return None, None, False, False
+        ys = [c[0] for c in cl]
         gaps = sorted(b - a for a, b in zip(ys, ys[1:]))
         line_h = gaps[len(gaps) // 2] or 12
         header = footer = None
+        h_run = f_run = False
         for k in range(min(3, len(ys) - 1)):
-            if ys[k] > H * 0.12:
+            gap = ys[k + 1] - ys[k]
+            rep = bool(running) and running(Sentencizer._line_key(cl[k][2]), ys[k])
+            if ys[k] > H * 0.12 and not rep:
                 break
-            if ys[k + 1] - ys[k] > 1.8 * line_h:
-                header = ys[k]
+            if gap > 1.8 * line_h or (rep and gap > 1.3 * line_h):
+                header, h_run = cl[k][1], rep
                 break
+            h_run = h_run or rep
+        if header is None:
+            h_run = False
         for k in range(len(ys) - 1, max(len(ys) - 4, 0), -1):
-            if ys[k] < H * 0.85:
+            gap = ys[k] - ys[k - 1]
+            rep = bool(running) and running(Sentencizer._line_key(cl[k][2]), ys[k])
+            if ys[k] < H * 0.85 and not rep:
                 break
-            if ys[k] - ys[k - 1] > 1.8 * line_h:
-                footer = ys[k]
+            if gap > 1.8 * line_h or (rep and gap > 1.3 * line_h):
+                footer, f_run = ys[k], f_run or rep
                 break
-        return header, footer
+            f_run = f_run or rep
+        if footer is None:
+            f_run = False
+        return header, footer, h_run, f_run
+
+    @staticmethod
+    def _line_clusters(tokens):
+        """Text lines as [first y, last y, tokens], top to bottom; lines of two columns rarely align exactly,
+        so words whose tops lie within 3 pt of a line's first word belong to it."""
+        cl = []
+        for t in sorted(tokens, key=lambda t: t["rects"][0][1]):
+            y = t["rects"][0][1]
+            if cl and y - cl[-1][0] <= 3:
+                cl[-1][1] = max(cl[-1][1], y)
+                cl[-1][2].append(t)
+            else:
+                cl.append([y, y, [t]])
+        return cl
+
+    @staticmethod
+    def _line_key(toks):
+        """A line's text with numbers masked, so that 'Introduction 9' matches 'Introduction 11'."""
+        txt = " ".join(t["text"] for t in sorted(toks, key=lambda t: t["rects"][0][0]) if "text" in t)
+        return re.sub(r"\s+", " ", re.sub(r"\d+", "#", txt.lower())).strip()
+
+    def _edge_lines(self, n):
+        """(key, y) of the top three and bottom three lines of page n."""
+        if n not in self._edges:
+            toks = [{"text": fix_legacy(w[4].translate(LIGATURES)) if self.legacy else w[4].translate(LIGATURES), "rects": [w[:4]]}
+                    for w in self.doc[n].get_text("words")]
+            cl = self._line_clusters(toks)
+            self._edges[n] = [(self._line_key(c[2]), c[0]) for c in cl[:3] + cl[-3:]] if len(cl) >= 4 else []
+        return self._edges[n]
+
+    def _repeats_nearby(self, n):
+        """running(key, y): the same line (numbers aside) sits at the same height on a page up to two pages away.
+        Two pages, because books alternate running heads (chapter title on the left, section title on the right)."""
+        near = [m for m in (n - 2, n - 1, n + 1, n + 2) if 0 <= m < self.doc.page_count]
+
+        def running(key, y):
+            if not key:
+                return False
+            return any(k == key and abs(y2 - y) <= 3 for m in near for k, y2 in self._edge_lines(m))
+        return running
 
     def _split(self, toks, page_height=0, edges=(None, None)):
         sentences = []
@@ -379,7 +550,7 @@ class Sentencizer:
         return {"text": text, "rects": rects, "_toks": toks_out, "size": sizes[len(sizes) // 2] if sizes else 0}
 
     @staticmethod
-    def _mark_skips(sentences, rect, body_size=0, edges=(None, None)):
+    def _mark_skips(sentences, rect, body_size=0, edges=(None, None), running=(False, False)):
         """Running headers, footers, download stamps and footnotes are shown but not read (and not joined into sentences)."""
         out = []
         H = rect.height
@@ -394,6 +565,8 @@ class Sentencizer:
             small = bool(body_size) and s.get("size", 0) <= body_size - 1.5
             if not re.search(r"[A-Za-z]", txt):
                 skip = True
+            elif (running[0] and header is not None and top <= header + 1) or (running[1] and footer is not None and top >= footer - 1):
+                skip = True   # recurs at the same place on the neighbouring pages
             elif near_top or near_bottom:
                 looks_header = re.match(r"^\d{1,4}\s+\S", txt) or re.search(r"\s\d{1,4}$", txt)
                 if small or STAMP_RE.search(txt) or (len(s["rects"]) <= 2 and looks_header and len(txt.split()) <= 12):
@@ -402,7 +575,7 @@ class Sentencizer:
                 skip = True   # footnotes: clearly smaller type at the foot of the page, or numbered small text lower down
             elif STAMP_RE.search(txt) and len(txt) < 400 and (top > H * 0.75 or bottom < H * 0.2):
                 skip = True   # publisher stamps that sit a little further in
-            out.append({"id": i, "text": txt, "rects": s["rects"], "skip": skip, "_toks": s["_toks"]})
+            out.append({"id": i, "text": txt, "rects": s["rects"], "skip": skip, "_toks": s["_toks"], "size": s.get("size", 0)})
         return out
 
 
@@ -519,7 +692,7 @@ def _ref_lines(doc, start_page, end_page=None):
     for pno in range(start_page, min(doc.page_count, end_page if end_page is not None else start_page + 60)):
         pg = doc[pno]
         H = pg.rect.height
-        header, _ = Sentencizer._edge_zones([{"rects": [w[:4]]} for w in pg.get_text("words")], H)
+        header = Sentencizer._edge_zones([{"rects": [w[:4]]} for w in pg.get_text("words")], H)[0]
         top = header + 1 if header is not None else H * 0.08   # a fixed 8% would also cut a column's first line on tight pages
         for b in pg.get_text("dict")["blocks"]:
             for ln in b.get("lines", []):
