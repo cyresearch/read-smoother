@@ -95,12 +95,14 @@ NOTE_TEXT = {
         "callout": "> [!info]- This section is maintained by Read Smoother\n"
                    "> Edit the note text under each quote freely; add or remove quotes from the reading page. Keep the `%% ... %%` marker lines.",
         "no_toc": "(no table of contents)",
+        "login": "Claude Code needs you to sign in again: open Terminal, run claude, then type /login. Then ask again.",
     },
     "zh": {
         "section": "## 摘录与感想",
         "callout": "> [!info]- 这一节由畅读自动维护\n"
                    "> 每条摘录下面的感想可以直接在这里改；摘录本身请在阅读页面里删改。标记行 `%% ... %%` 请保留。",
         "no_toc": "（没有目录）",
+        "login": "Claude Code 需要重新登录：打开终端运行 claude，再输入 /login，登录后重新提问。",
     },
 }
 
@@ -2075,6 +2077,18 @@ def heading_lines(doc, max_lines=3000):
     return "\n".join(out[:max_lines]), body
 
 
+AUTH_RE = re.compile(r"/login|log ?in|sign ?in|api key|oauth|token.{0,30}(expired|invalid|revoked)|unauthori[sz]ed|\b401\b|authenticat", re.I)
+
+
+def claude_error(cfg, proc_rc, stdout_err, stderr):
+    """A readable reason why `claude -p` failed. Claude Code reports most failures (an expired sign-in, a model it
+    cannot use) in its JSON result on stdout, not on stderr; a sign-in problem also gets a hint on how to fix it."""
+    msg = (stdout_err or "").strip() or (stderr or "").strip()[-400:] or f"claude exited with code {proc_rc}"
+    if AUTH_RE.search(msg):
+        msg = note_text(cfg, "login") + "\n(" + msg[:300] + ")"
+    return msg
+
+
 def ai_toc(book, model="sonnet"):
     """Ask Claude to build the table of contents from the book's own text (papers without bookmarks).
     A long book does not fit: then it gets the printed table of contents, if there is one, and every line set apart
@@ -2108,12 +2122,13 @@ def ai_toc(book, model="sonnet"):
     cmd = [CLAUDE_BIN, "-p", "--model", model, "--tools", "", "--permission-mode", "dontAsk",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--output-format", "json"]
     proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, env=_clean_env(), cwd=str(DATA), timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "").strip()[-400:] or f"claude exited with code {proc.returncode}")
     try:
-        out = json.loads(proc.stdout).get("result", "")
+        res = json.loads(proc.stdout)
     except ValueError:
-        out = proc.stdout
+        res = {"result": proc.stdout, "is_error": proc.returncode != 0}
+    if proc.returncode != 0 or res.get("is_error"):
+        raise RuntimeError(claude_error(book.cfg, proc.returncode, res.get("result") if res.get("is_error") else "", proc.stderr))
+    out = res.get("result", "")
     toc = []
     for line in out.splitlines():
         m = re.match(r"^\s*([1-4])\s*[\t|]\s*(?:p\.?\s*)?(\d+)\s*[\t|]\s*(.+?)\s*$", line)
@@ -2196,11 +2211,13 @@ def ask_stream(book, question, model, page, sid, include_page, include_sentence,
     if chat.data.get("session_id"):
         cmd += ["--resume", chat.data["session_id"]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_clean_env(), cwd=str(DATA), text=True)
-    answer, session_id, err = [], chat.data.get("session_id"), None
+    answer, session_id, err, plain = [], chat.data.get("session_id"), None, []
     for line in proc.stdout:
         try:
             d = json.loads(line)
         except ValueError:
+            if line.strip():
+                plain.append(line.strip())   # a message printed outside the JSON stream
             continue
         t = d.get("type")
         if t == "stream_event":
@@ -2219,8 +2236,8 @@ def ask_stream(book, question, model, page, sid, include_page, include_sentence,
                 answer.append(d["result"])
                 yield d["result"]
     proc.wait()
-    if proc.returncode != 0 and not answer:
-        err = (proc.stderr.read() or "").strip()[-400:] or f"claude exited with code {proc.returncode}"
+    if err or (proc.returncode != 0 and not answer):
+        err = claude_error(book.cfg, proc.returncode, err or "\n".join(plain[-5:]), proc.stderr.read())
     with chat.lock:
         chat.data["session_id"] = session_id
         chat.data["messages"].append({"role": "user", "text": question, "page": page, "ts": dt.datetime.now().isoformat(timespec="seconds")})
